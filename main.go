@@ -1,30 +1,43 @@
-// Command rileighos is the Phase 1 CLI for RileighOS.
+// Command rileighos is the Phase 2 CLI + server for RileighOS.
 //
-// It talks only to the Store interface — never to SQL or JSON directly.
-// The storage backend is chosen in exactly one place (openStore), so
-// swapping backends is a one-line change:
+// It has two modes sharing one binary for now (same machine, localhost):
 //
-//	rileighos --backend json ...   # flat JSON file (the starting point)
-//	rileighos --backend sqlite ... # SQLite file (the default)
+//	rileighos serve ...   # run the HTTP server around the Store
+//	rileighos todo ...    # CLI client: HTTP calls to the server, never
+//	rileighos note ...    # touching storage directly
+//
+// The storage backend is chosen in exactly one place (openStore, used only
+// by serve), so swapping backends remains a one-line change:
+//
+//	rileighos serve --backend json   # flat JSON file (the starting point)
+//	rileighos serve --backend sqlite # SQLite file (the default)
 package main
 
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
-const usage = `rileighos — personal ADHD productivity tool (phase 1: local CLI)
+const usage = `rileighos — personal ADHD productivity tool (phase 2: client/server)
 
 usage:
-  rileighos [--backend sqlite|json] [--db PATH] [--json PATH] <todo|note> <command> [args]
+  rileighos serve [--backend sqlite|json] [--db PATH] [--json PATH] [--addr HOST:PORT]
+  rileighos [--server URL] <todo|note> <command> [args]
 
-global flags:
+serve flags:
   --backend sqlite|json   storage backend (default "sqlite")
   --db PATH               sqlite file (default "rileighos.db")
   --json PATH             json file for --backend json (default "rileighos.json")
+  --addr HOST:PORT        listen address (default "localhost:8080")
+
+global flags:
+  --server URL            server to talk to (default "http://localhost:8080",
+                          env RILEIGHOS_SERVER_URL)
 
 todo commands:
   rileighos todo add <text>            add a todo
@@ -48,12 +61,64 @@ func main() {
 }
 
 func run(args []string) error {
-	// Defaults: SQLite wins per the Phase 1 "Done when" criteria.
+	// The CLI is a pure HTTP client in Phase 2: the only thing it needs
+	// to know is where the server lives.
+	serverURL := envOr("RILEIGHOS_SERVER_URL", "http://localhost:8080")
+
+	// Parse global flags (everything before <serve|todo|note>).
+	for len(args) > 0 && strings.HasPrefix(args[0], "-") {
+		switch args[0] {
+		case "--server":
+			if len(args) < 2 {
+				return errors.New("--server needs a URL, e.g. --server http://localhost:8080")
+			}
+			serverURL = args[1]
+			args = args[2:]
+		case "-h", "--help", "help":
+			fmt.Print(usage)
+			return nil
+		case "--backend", "--db", "--json":
+			// These moved to `serve` in the client/server split; fail
+			// loudly instead of silently ignoring them.
+			return fmt.Errorf("%s is a `rileighos serve` flag now — the CLI only needs --server\n\n%s", args[0], usage)
+		default:
+			return fmt.Errorf("unknown flag %q\n\n%s", args[0], usage)
+		}
+	}
+
+	if len(args) == 0 {
+		fmt.Print(usage)
+		return nil
+	}
+
+	resource, args := strings.ToLower(args[0]), args[1:]
+	switch resource {
+	case "serve":
+		return runServe(args)
+	case "todo", "todos":
+		client := NewClient(serverURL)
+		defer client.Close()
+		return runTodo(client, args)
+	case "note", "notes":
+		client := NewClient(serverURL)
+		defer client.Close()
+		return runNote(client, args)
+	case "help", "-h", "--help":
+		fmt.Print(usage)
+		return nil
+	default:
+		return fmt.Errorf("unknown resource %q (want serve, todo or note)\n\n%s", resource, usage)
+	}
+}
+
+// runServe starts the HTTP server around the Store. Storage flags live here
+// now — this is the only path that touches a backend directly.
+func runServe(args []string) error {
 	backend := "sqlite"
 	dbPath := envOr("RILEIGHOS_DB_PATH", "rileighos.db")
 	jsonPath := envOr("RILEIGHOS_JSON_PATH", "rileighos.json")
+	addr := envOr("RILEIGHOS_ADDR", "localhost:8080")
 
-	// Parse global flags (everything before <todo|note>).
 	for len(args) > 0 && strings.HasPrefix(args[0], "-") {
 		switch args[0] {
 		case "--backend":
@@ -74,17 +139,21 @@ func run(args []string) error {
 			}
 			jsonPath = args[1]
 			args = args[2:]
+		case "--addr":
+			if len(args) < 2 {
+				return errors.New("--addr needs a value, e.g. --addr localhost:8080")
+			}
+			addr = args[1]
+			args = args[2:]
 		case "-h", "--help", "help":
 			fmt.Print(usage)
 			return nil
 		default:
-			return fmt.Errorf("unknown flag %q\n\n%s", args[0], usage)
+			return fmt.Errorf("unknown serve flag %q\n\n%s", args[0], usage)
 		}
 	}
-
-	if len(args) == 0 {
-		fmt.Print(usage)
-		return nil
+	if len(args) != 0 {
+		return fmt.Errorf("unexpected argument %q\n\n%s", args[0], usage)
 	}
 
 	// THE one-line swap: pick a backend, then everything below
@@ -95,23 +164,18 @@ func run(args []string) error {
 	}
 	defer store.Close()
 
-	resource, args := strings.ToLower(args[0]), args[1:]
-	switch resource {
-	case "todo", "todos":
-		return runTodo(store, args)
-	case "note", "notes":
-		return runNote(store, args)
-	case "help", "-h", "--help":
-		fmt.Print(usage)
-		return nil
-	default:
-		return fmt.Errorf("unknown resource %q (want todo or note)\n\n%s", resource, usage)
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           NewServer(store).Handler(),
+		ReadHeaderTimeout: 5 * time.Second,
 	}
+	fmt.Printf("rileighos server listening on http://%s (backend %s)\n", addr, backend)
+	return srv.ListenAndServe()
 }
 
 // openStore is the single place where the storage backend is chosen.
-// To change the app's storage, change this function — nothing else
-// in main.go knows which backend is in use.
+// Only runServe calls it — the todo/note CLI paths talk HTTP and never
+// touch a backend directly.
 func openStore(backend, dbPath, jsonPath string) (Store, error) {
 	switch strings.ToLower(backend) {
 	case "sqlite":
