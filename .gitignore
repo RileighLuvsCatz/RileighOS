@@ -1,0 +1,9 @@
+# built binary
+/rileighos
+
+# local data files (default backend paths in cwd)
+rileighos.db
+rileighos.json
+
+# personal planning doc, not part of the build
+rileighos-roadmap.md

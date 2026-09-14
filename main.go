@@ -1,11 +1,11 @@
-// Command lifeos is the Phase 1 CLI for LifeOS.
+// Command rileighos is the Phase 1 CLI for RileighOS.
 //
 // It talks only to the Store interface — never to SQL or JSON directly.
 // The storage backend is chosen in exactly one place (openStore), so
 // swapping backends is a one-line change:
 //
-//	lifeos --backend json ...   # flat JSON file (the starting point)
-//	lifeos --backend sqlite ... # SQLite file (the default)
+//	rileighos --backend json ...   # flat JSON file (the starting point)
+//	rileighos --backend sqlite ... # SQLite file (the default)
 package main
 
 import (
@@ -16,28 +16,28 @@ import (
 	"strings"
 )
 
-const usage = `lifeos — personal ADHD productivity tool (phase 1: local CLI)
+const usage = `rileighos — personal ADHD productivity tool (phase 1: local CLI)
 
 usage:
-  lifeos [--backend sqlite|json] [--db PATH] [--json PATH] <todo|note> <command> [args]
+  rileighos [--backend sqlite|json] [--db PATH] [--json PATH] <todo|note> <command> [args]
 
 global flags:
   --backend sqlite|json   storage backend (default "sqlite")
-  --db PATH               sqlite file (default "lifeos.db")
-  --json PATH             json file for --backend json (default "lifeos.json")
+  --db PATH               sqlite file (default "rileighos.db")
+  --json PATH             json file for --backend json (default "rileighos.json")
 
 todo commands:
-  lifeos todo add <text>            add a todo
-  lifeos todo list [--all|--done|--open]
-  lifeos todo done <id>             mark a todo done
-  lifeos todo undone <id>           mark a todo not done
-  lifeos todo delete <id>
+  rileighos todo add <text>            add a todo
+  rileighos todo list [--all|--done|--open]
+  rileighos todo done <id>             mark a todo done
+  rileighos todo undone <id>           mark a todo not done
+  rileighos todo delete <id>
 
 note commands:
-  lifeos note add <text>            add a note
-  lifeos note list
-  lifeos note show <id>
-  lifeos note delete <id>
+  rileighos note add <text>            add a note
+  rileighos note list
+  rileighos note show <id>
+  rileighos note delete <id>
 `
 
 func main() {
@@ -50,8 +50,8 @@ func main() {
 func run(args []string) error {
 	// Defaults: SQLite wins per the Phase 1 "Done when" criteria.
 	backend := "sqlite"
-	dbPath := envOr("LIFEOS_DB_PATH", "lifeos.db")
-	jsonPath := envOr("LIFEOS_JSON_PATH", "lifeos.json")
+	dbPath := envOr("RILEIGHOS_DB_PATH", "rileighos.db")
+	jsonPath := envOr("RILEIGHOS_JSON_PATH", "rileighos.json")
 
 	// Parse global flags (everything before <todo|note>).
 	for len(args) > 0 && strings.HasPrefix(args[0], "-") {
@@ -131,7 +131,7 @@ func runTodo(s Store, args []string) error {
 	switch cmd {
 	case "add":
 		if len(args) == 0 {
-			return errors.New("usage: lifeos todo add <text>")
+			return errors.New("usage: rileighos todo add <text>")
 		}
 		t, err := s.AddTodo(strings.Join(args, " "))
 		if err != nil {
@@ -146,7 +146,7 @@ func runTodo(s Store, args []string) error {
 			case "--all", "--done", "--open":
 				filter = strings.TrimPrefix(a, "--")
 			default:
-				return errors.New("usage: lifeos todo list [--all|--done|--open]")
+				return errors.New("usage: rileighos todo list [--all|--done|--open]")
 			}
 		}
 		todos, err := s.GetTodos()
@@ -177,7 +177,7 @@ func runTodo(s Store, args []string) error {
 		}
 		return nil
 	case "done":
-		id, err := needID(args, "usage: lifeos todo done <id>")
+		id, err := needID(args, "usage: rileighos todo done <id>")
 		if err != nil {
 			return err
 		}
@@ -187,7 +187,7 @@ func runTodo(s Store, args []string) error {
 		fmt.Printf("todo %d done\n", id)
 		return nil
 	case "undone":
-		id, err := needID(args, "usage: lifeos todo undone <id>")
+		id, err := needID(args, "usage: rileighos todo undone <id>")
 		if err != nil {
 			return err
 		}
@@ -197,7 +197,7 @@ func runTodo(s Store, args []string) error {
 		fmt.Printf("todo %d marked not done\n", id)
 		return nil
 	case "delete", "del", "rm":
-		id, err := needID(args, "usage: lifeos todo delete <id>")
+		id, err := needID(args, "usage: rileighos todo delete <id>")
 		if err != nil {
 			return err
 		}
@@ -219,7 +219,7 @@ func runNote(s Store, args []string) error {
 	switch cmd {
 	case "add":
 		if len(args) == 0 {
-			return errors.New("usage: lifeos note add <text>")
+			return errors.New("usage: rileighos note add <text>")
 		}
 		n, err := s.AddNote(strings.Join(args, " "))
 		if err != nil {
@@ -229,7 +229,7 @@ func runNote(s Store, args []string) error {
 		return nil
 	case "list", "ls":
 		if len(args) != 0 {
-			return errors.New("usage: lifeos note list")
+			return errors.New("usage: rileighos note list")
 		}
 		notes, err := s.GetNotes()
 		if err != nil {
@@ -244,7 +244,7 @@ func runNote(s Store, args []string) error {
 		}
 		return nil
 	case "show", "get":
-		id, err := needID(args, "usage: lifeos note show <id>")
+		id, err := needID(args, "usage: rileighos note show <id>")
 		if err != nil {
 			return err
 		}
@@ -255,7 +255,7 @@ func runNote(s Store, args []string) error {
 		fmt.Printf("%d %s\n", n.ID, n.Content)
 		return nil
 	case "delete", "del", "rm":
-		id, err := needID(args, "usage: lifeos note delete <id>")
+		id, err := needID(args, "usage: rileighos note delete <id>")
 		if err != nil {
 			return err
 		}

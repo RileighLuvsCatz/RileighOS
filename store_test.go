@@ -13,7 +13,7 @@ func openTestStores(t *testing.T) map[string]func(t *testing.T) Store {
 	return map[string]func(t *testing.T) Store{
 		"json": func(t *testing.T) Store {
 			t.Helper()
-			s, err := OpenJSONStore(filepath.Join(t.TempDir(), "lifeos.json"))
+			s, err := OpenJSONStore(filepath.Join(t.TempDir(), "rileighos.json"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -22,7 +22,7 @@ func openTestStores(t *testing.T) map[string]func(t *testing.T) Store {
 		},
 		"sqlite": func(t *testing.T) Store {
 			t.Helper()
-			s, err := OpenSQLiteStore(filepath.Join(t.TempDir(), "lifeos.db"))
+			s, err := OpenSQLiteStore(filepath.Join(t.TempDir(), "rileighos.db"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -172,7 +172,7 @@ func TestNoteCRUD(t *testing.T) {
 
 func TestJSONPersistsAcrossReopen(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "lifeos.json")
+	path := filepath.Join(dir, "rileighos.json")
 
 	s, err := OpenJSONStore(path)
 	if err != nil {
@@ -220,7 +220,7 @@ func TestJSONPersistsAcrossReopen(t *testing.T) {
 
 func TestSQLitePersistsAcrossReopen(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "lifeos.db")
+	path := filepath.Join(dir, "rileighos.db")
 
 	s, err := OpenSQLiteStore(path)
 	if err != nil {
