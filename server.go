@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -22,6 +23,14 @@ import (
 //	POST   /notes          create a note, body {"content": "..."} -> 201
 //	GET    /notes/{id}     fetch one note
 //	DELETE /notes/{id}     delete a note -> 204
+//	GET    /checkoffs      list all checkoffs
+//	POST   /checkoffs      create a checkoff, body {"name": "..."} -> 201
+//	GET    /checkoffs/{id} fetch one checkoff (with days, streak, checked_today)
+//	DELETE /checkoffs/{id} delete a checkoff and its days -> 204
+//	POST   /checkoffs/{id}/check   check a day, body {} or {"day": "YYYY-MM-DD"} -> 200
+//	DELETE /checkoffs/{id}/check   uncheck a day, same body shape -> 200
+//	GET    /today          "what does my day look like": open todos plus
+//	                       check-offs with streaks, in one call
 //
 // Notes intentionally have no PATCH route: they carry no done state and
 // the Store has no content-update operation, so there is nothing mutable
@@ -47,6 +56,9 @@ func NewServer(store Store) *Server {
 	s.mux.HandleFunc("/todos/", s.handleTodoByID)
 	s.mux.HandleFunc("/notes", s.handleNotes)
 	s.mux.HandleFunc("/notes/", s.handleNoteByID)
+	s.mux.HandleFunc("/checkoffs", s.handleCheckoffs)
+	s.mux.HandleFunc("/checkoffs/", s.handleCheckoffByID)
+	s.mux.HandleFunc("/today", s.handleToday)
 	return s
 }
 
@@ -306,6 +318,181 @@ func (s *Server) handleNoteByID(w http.ResponseWriter, r *http.Request) {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+// --- checkoffs ---
+
+// nameBody is the POST /checkoffs request shape.
+type nameBody struct {
+	Name string `json:"name"`
+}
+
+// checkBody is the check/uncheck request shape. An empty day means today;
+// an explicit day enables backfill and (more importantly) deterministic
+// tests of streaks that would otherwise need consecutive real days.
+type checkBody struct {
+	Day string `json:"day"`
+}
+
+// checkoffView aliases the shared CheckoffView model: the GET
+// /checkoffs/{id} response shape.
+type checkoffView = CheckoffView
+
+// todayView aliases the shared TodayView model: the GET /today response.
+type todayView = TodayView
+
+// handleCheckoffs dispatches the /checkoffs collection route.
+func (s *Server) handleCheckoffs(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		checkoffs, err := s.store.GetCheckoffs()
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, checkoffs)
+	case http.MethodPost:
+		r.Body = http.MaxBytesReader(nil, r.Body, 1<<20)
+		var b nameBody
+		if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid request body: %s", err)
+			return
+		}
+		c, err := s.store.AddCheckoff(b.Name)
+		if err != nil {
+			if strings.TrimSpace(b.Name) == "" {
+				writeError(w, http.StatusBadRequest, "%s", err)
+				return
+			}
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, c)
+	default:
+		methodNotAllowed(w, r, http.MethodGet, http.MethodPost)
+	}
+}
+
+// handleCheckoffByID dispatches /checkoffs/{id} and /checkoffs/{id}/check.
+func (s *Server) handleCheckoffByID(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/checkoffs/")
+	parts := strings.Split(rest, "/")
+	if len(parts) > 2 || parts[0] == "" || (len(parts) == 2 && parts[1] != "check") {
+		writeError(w, http.StatusNotFound, "no such checkoff route %q", r.URL.Path)
+		return
+	}
+	id, ok := pathID(w, parts[0], "checkoff")
+	if !ok {
+		return
+	}
+	if len(parts) == 2 {
+		s.handleCheck(w, r, id)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		view, err := s.viewCheckoff(id, Today())
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, view)
+	case http.MethodDelete:
+		if err := s.store.DeleteCheckoff(id); err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		methodNotAllowed(w, r, http.MethodGet, http.MethodDelete)
+	}
+}
+
+// handleCheck dispatches the /checkoffs/{id}/check sub-route: POST checks
+// a day (idempotent), DELETE unchecks it. Both answer with the updated
+// view so the client does not need a second GET.
+func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request, id int) {
+	switch r.Method {
+	case http.MethodPost, http.MethodDelete:
+		// Validated and dispatched below.
+	default:
+		methodNotAllowed(w, r, http.MethodPost, http.MethodDelete)
+		return
+	}
+	r.Body = http.MaxBytesReader(nil, r.Body, 1<<20)
+	var b checkBody
+	// An empty body just means "today" — but it must still be valid JSON
+	// when present, so only tolerate EOF, not garbage.
+	if err := json.NewDecoder(r.Body).Decode(&b); err != nil && err != io.EOF {
+		writeError(w, http.StatusBadRequest, "invalid request body: %s", err)
+		return
+	}
+	day := b.Day
+	if day == "" {
+		day = Today()
+	}
+	if !ValidDay(day) {
+		writeError(w, http.StatusBadRequest, "invalid day %q: want YYYY-MM-DD", b.Day)
+		return
+	}
+	var err error
+	if r.Method == http.MethodPost {
+		err = s.store.CheckDay(id, day)
+	} else {
+		err = s.store.UncheckDay(id, day)
+	}
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	view, err := s.viewCheckoff(id, Today())
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
+}
+
+// viewCheckoff builds the derived view for one checkoff as of today.
+func (s *Server) viewCheckoff(id int, today string) (checkoffView, error) {
+	c, err := s.store.GetCheckoff(id)
+	if err != nil {
+		return checkoffView{}, err
+	}
+	days, err := s.store.GetCheckoffDays(id)
+	if err != nil {
+		return checkoffView{}, err
+	}
+	checked := false
+	for _, d := range days {
+		if d == today {
+			checked = true
+			break
+		}
+	}
+	return checkoffView{
+		Checkoff:     c,
+		Days:         days,
+		Streak:       CurrentStreak(days, today),
+		CheckedToday: checked,
+	}, nil
+}
+
+// handleToday answers "what does my day look like": open todos plus every
+// check-off with its streak, assembled by the store as of the
+// server-local date — so the CLI gets the same answer over HTTP that a
+// local backend would give directly.
+func (s *Server) handleToday(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, r, http.MethodGet)
+		return
+	}
+	view, err := s.store.GetToday()
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
 }
 
 func (s *Server) handleListNotes(w http.ResponseWriter, _ *http.Request) {

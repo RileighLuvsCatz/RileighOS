@@ -53,6 +53,19 @@ func (s *SQLiteStore) migrate() error {
 			content TEXT NOT NULL,
 			created_at TEXT NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS checkoffs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		)`,
+		// One row per checked day. The composite key makes checking the
+		// same day twice a no-op (INSERT OR IGNORE), so streaks cannot
+		// be corrupted by retries or double-taps.
+		`CREATE TABLE IF NOT EXISTS checkoff_days (
+			checkoff_id INTEGER NOT NULL REFERENCES checkoffs(id),
+			day TEXT NOT NULL,
+			PRIMARY KEY (checkoff_id, day)
+		)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -256,4 +269,243 @@ func (s *SQLiteStore) DeleteNote(id int) error {
 		return fmt.Errorf("note %d: %w", id, ErrNotFound)
 	}
 	return nil
+}
+
+func (s *SQLiteStore) AddCheckoff(name string) (Checkoff, error) {
+	if strings.TrimSpace(name) == "" {
+		return Checkoff{}, fmt.Errorf("checkoff name must not be empty")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UTC()
+	res, err := s.db.Exec(
+		`INSERT INTO checkoffs (name, created_at) VALUES (?, ?)`,
+		name, now.Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return Checkoff{}, fmt.Errorf("insert checkoff: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return Checkoff{}, fmt.Errorf("checkoff id: %w", err)
+	}
+	return Checkoff{ID: int(id), Name: name, CreatedAt: now}, nil
+}
+
+func (s *SQLiteStore) GetCheckoffs() ([]Checkoff, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query(`SELECT id, name, created_at FROM checkoffs ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("list checkoffs: %w", err)
+	}
+	defer rows.Close()
+	checkoffs := []Checkoff{}
+	for rows.Next() {
+		var c Checkoff
+		var created string
+		if err := rows.Scan(&c.ID, &c.Name, &created); err != nil {
+			return nil, fmt.Errorf("scan checkoff: %w", err)
+		}
+		c.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+		checkoffs = append(checkoffs, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list checkoffs: %w", err)
+	}
+	return checkoffs, nil
+}
+
+func (s *SQLiteStore) GetCheckoff(id int) (Checkoff, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.getCheckoff(id)
+}
+
+// getCheckoff is the lock-held helper behind GetCheckoff and the day
+// methods, so existence checks and day writes stay atomic.
+func (s *SQLiteStore) getCheckoff(id int) (Checkoff, error) {
+	var c Checkoff
+	var created string
+	err := s.db.QueryRow(
+		`SELECT id, name, created_at FROM checkoffs WHERE id = ?`, id,
+	).Scan(&c.ID, &c.Name, &created)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Checkoff{}, fmt.Errorf("checkoff %d: %w", id, ErrNotFound)
+		}
+		return Checkoff{}, fmt.Errorf("get checkoff %d: %w", id, err)
+	}
+	c.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+	return c, nil
+}
+
+func (s *SQLiteStore) DeleteCheckoff(id int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.getCheckoff(id); err != nil {
+		return err
+	}
+	// Days are deleted explicitly rather than by foreign-key cascade, so
+	// this works regardless of the connection's foreign_keys pragma.
+	if _, err := s.db.Exec(`DELETE FROM checkoff_days WHERE checkoff_id = ?`, id); err != nil {
+		return fmt.Errorf("delete checkoff %d days: %w", id, err)
+	}
+	if _, err := s.db.Exec(`DELETE FROM checkoffs WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("delete checkoff %d: %w", id, err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) CheckDay(id int, day string) error {
+	if day == "" {
+		day = Today()
+	}
+	if !ValidDay(day) {
+		return fmt.Errorf("invalid day %q: want YYYY-MM-DD", day)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.getCheckoff(id); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(
+		`INSERT OR IGNORE INTO checkoff_days (checkoff_id, day) VALUES (?, ?)`, id, day,
+	); err != nil {
+		return fmt.Errorf("check checkoff %d on %s: %w", id, day, err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) UncheckDay(id int, day string) error {
+	if day == "" {
+		day = Today()
+	}
+	if !ValidDay(day) {
+		return fmt.Errorf("invalid day %q: want YYYY-MM-DD", day)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.getCheckoff(id); err != nil {
+		return err
+	}
+	// Removing a day that was never checked is a no-op (idempotent,
+	// mirroring CheckDay), so RowsAffected is deliberately ignored.
+	if _, err := s.db.Exec(
+		`DELETE FROM checkoff_days WHERE checkoff_id = ? AND day = ?`, id, day,
+	); err != nil {
+		return fmt.Errorf("uncheck checkoff %d on %s: %w", id, day, err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) GetCheckoffDays(id int) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.getCheckoff(id); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.Query(
+		`SELECT day FROM checkoff_days WHERE checkoff_id = ? ORDER BY day`, id,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list checkoff %d days: %w", id, err)
+	}
+	defer rows.Close()
+	days := []string{}
+	for rows.Next() {
+		var day string
+		if err := rows.Scan(&day); err != nil {
+			return nil, fmt.Errorf("scan checkoff day: %w", err)
+		}
+		days = append(days, day)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list checkoff %d days: %w", id, err)
+	}
+	return days, nil
+}
+
+func (s *SQLiteStore) GetToday() (TodayView, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	today := Today()
+
+	todoRows, err := s.db.Query(`SELECT id, content, done, created_at FROM todos ORDER BY id`)
+	if err != nil {
+		return TodayView{}, fmt.Errorf("today todos: %w", err)
+	}
+	defer todoRows.Close()
+	open := []Todo{}
+	for todoRows.Next() {
+		var t Todo
+		var done int
+		var created string
+		if err := todoRows.Scan(&t.ID, &t.Content, &done, &created); err != nil {
+			return TodayView{}, fmt.Errorf("scan today todo: %w", err)
+		}
+		if done != 0 {
+			continue
+		}
+		t.Done = false
+		t.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+		open = append(open, t)
+	}
+	if err := todoRows.Err(); err != nil {
+		return TodayView{}, fmt.Errorf("today todos: %w", err)
+	}
+
+	coRows, err := s.db.Query(`SELECT id, name, created_at FROM checkoffs ORDER BY id`)
+	if err != nil {
+		return TodayView{}, fmt.Errorf("today checkoffs: %w", err)
+	}
+	defer coRows.Close()
+	checkoffs := []Checkoff{}
+	for coRows.Next() {
+		var c Checkoff
+		var created string
+		if err := coRows.Scan(&c.ID, &c.Name, &created); err != nil {
+			return TodayView{}, fmt.Errorf("scan today checkoff: %w", err)
+		}
+		c.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+		checkoffs = append(checkoffs, c)
+	}
+	if err := coRows.Err(); err != nil {
+		return TodayView{}, fmt.Errorf("today checkoffs: %w", err)
+	}
+
+	dayRows, err := s.db.Query(`SELECT checkoff_id, day FROM checkoff_days ORDER BY checkoff_id, day`)
+	if err != nil {
+		return TodayView{}, fmt.Errorf("today checkoff days: %w", err)
+	}
+	defer dayRows.Close()
+	byCheckoff := map[int][]string{}
+	for dayRows.Next() {
+		var cid int
+		var day string
+		if err := dayRows.Scan(&cid, &day); err != nil {
+			return TodayView{}, fmt.Errorf("scan today checkoff day: %w", err)
+		}
+		byCheckoff[cid] = append(byCheckoff[cid], day)
+	}
+	if err := dayRows.Err(); err != nil {
+		return TodayView{}, fmt.Errorf("today checkoff days: %w", err)
+	}
+
+	views := []CheckoffView{}
+	for _, c := range checkoffs {
+		days := byCheckoff[c.ID]
+		if days == nil {
+			days = []string{}
+		}
+		// Days arrive ordered ascending, so the last one is the latest.
+		checkedToday := len(days) > 0 && days[len(days)-1] == today
+		views = append(views, CheckoffView{
+			Checkoff:     c,
+			Days:         days,
+			Streak:       CurrentStreak(days, today),
+			CheckedToday: checkedToday,
+		})
+	}
+	return TodayView{Date: today, OpenTodos: open, Checkoffs: views}, nil
 }

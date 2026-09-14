@@ -170,3 +170,68 @@ func (c *Client) GetNote(id int) (Note, error) {
 func (c *Client) DeleteNote(id int) error {
 	return c.do(http.MethodDelete, fmt.Sprintf("/notes/%d", id), nil, nil)
 }
+
+// --- checkoffs ---
+
+func (c *Client) AddCheckoff(name string) (Checkoff, error) {
+	var out Checkoff
+	if err := c.do(http.MethodPost, "/checkoffs", nameBody{Name: name}, &out); err != nil {
+		return Checkoff{}, err
+	}
+	return out, nil
+}
+
+func (c *Client) GetCheckoffs() ([]Checkoff, error) {
+	checkoffs := []Checkoff{}
+	if err := c.do(http.MethodGet, "/checkoffs", nil, &checkoffs); err != nil {
+		return nil, err
+	}
+	return checkoffs, nil
+}
+
+func (c *Client) GetCheckoff(id int) (Checkoff, error) {
+	view, err := c.GetCheckoffView(id)
+	if err != nil {
+		return Checkoff{}, err
+	}
+	return view.Checkoff, nil
+}
+
+// GetCheckoffView fetches the full derived view (days, streak,
+// checked-today). It is a client-only helper — the Store interface deals
+// in Checkoff plus GetCheckoffDays — for commands that show one habit.
+func (c *Client) GetCheckoffView(id int) (CheckoffView, error) {
+	var view CheckoffView
+	if err := c.do(http.MethodGet, fmt.Sprintf("/checkoffs/%d", id), nil, &view); err != nil {
+		return CheckoffView{}, err
+	}
+	return view, nil
+}
+
+func (c *Client) DeleteCheckoff(id int) error {
+	return c.do(http.MethodDelete, fmt.Sprintf("/checkoffs/%d", id), nil, nil)
+}
+
+func (c *Client) CheckDay(id int, day string) error {
+	return c.do(http.MethodPost, fmt.Sprintf("/checkoffs/%d/check", id), checkBody{Day: day}, nil)
+}
+
+func (c *Client) UncheckDay(id int, day string) error {
+	return c.do(http.MethodDelete, fmt.Sprintf("/checkoffs/%d/check", id), checkBody{Day: day}, nil)
+}
+
+func (c *Client) GetCheckoffDays(id int) ([]string, error) {
+	view, err := c.GetCheckoffView(id)
+	if err != nil {
+		return nil, err
+	}
+	return view.Days, nil
+}
+
+func (c *Client) GetToday() (TodayView, error) {
+	var view TodayView
+	if err := c.do(http.MethodGet, "/today", nil, &view); err != nil {
+		return TodayView{}, err
+	}
+	return view, nil
+}

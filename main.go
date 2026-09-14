@@ -51,6 +51,16 @@ note commands:
   rileighos note list
   rileighos note show <id>
   rileighos note delete <id>
+
+checkoff commands:
+  rileighos checkoff add <name>        add a daily habit
+  rileighos checkoff list              habits with streaks
+  rileighos checkoff show <id>
+  rileighos checkoff check <id> [YYYY-MM-DD]
+  rileighos checkoff uncheck <id> [YYYY-MM-DD]
+  rileighos checkoff delete <id>
+
+  rileighos today                      open todos + check-off streaks
 `
 
 func main() {
@@ -103,11 +113,22 @@ func run(args []string) error {
 		client := NewClient(serverURL)
 		defer client.Close()
 		return runNote(client, args)
+	case "checkoff", "checkoffs":
+		client := NewClient(serverURL)
+		defer client.Close()
+		return runCheckoff(client, args)
+	case "today":
+		if len(args) != 0 {
+			return errors.New("usage: rileighos today")
+		}
+		client := NewClient(serverURL)
+		defer client.Close()
+		return runToday(client)
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		return nil
 	default:
-		return fmt.Errorf("unknown resource %q (want serve, todo or note)\n\n%s", resource, usage)
+		return fmt.Errorf("unknown resource %q (want serve, todo, note, checkoff or today)\n\n%s", resource, usage)
 	}
 }
 
@@ -363,4 +384,160 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func runCheckoff(s Store, args []string) error {
+	if len(args) == 0 {
+		return errors.New("checkoff needs a command: add, list, show, check, uncheck, delete")
+	}
+	cmd, args := strings.ToLower(args[0]), args[1:]
+	switch cmd {
+	case "add":
+		if len(args) == 0 {
+			return errors.New("usage: rileighos checkoff add <name>")
+		}
+		c, err := s.AddCheckoff(strings.Join(args, " "))
+		if err != nil {
+			return err
+		}
+		fmt.Printf("added checkoff %d\n", c.ID)
+		return nil
+	case "list", "ls":
+		if len(args) != 0 {
+			return errors.New("usage: rileighos checkoff list")
+		}
+		checkoffs, err := s.GetCheckoffs()
+		if err != nil {
+			return err
+		}
+		if len(checkoffs) == 0 {
+			fmt.Println("(no checkoffs)")
+			return nil
+		}
+		for _, c := range checkoffs {
+			days, err := s.GetCheckoffDays(c.ID)
+			if err != nil {
+				return err
+			}
+			box := " "
+			for _, d := range days {
+				if d == Today() {
+					box = "x"
+					break
+				}
+			}
+			fmt.Printf("[%s] %d %s (streak %d)\n", box, c.ID, c.Name, CurrentStreak(days, Today()))
+		}
+		return nil
+	case "show", "get":
+		id, err := needID(args, "usage: rileighos checkoff show <id>")
+		if err != nil {
+			return err
+		}
+		c, err := s.GetCheckoff(id)
+		if err != nil {
+			return friendlyNotFound(err, "checkoff", id)
+		}
+		days, err := s.GetCheckoffDays(id)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%d %s (streak %d)\n", c.ID, c.Name, CurrentStreak(days, Today()))
+		if len(days) == 0 {
+			fmt.Println("no days checked yet")
+		} else {
+			fmt.Printf("checked: %s\n", strings.Join(days, ", "))
+		}
+		return nil
+	case "check":
+		id, day, err := needCheckDay(args, "usage: rileighos checkoff check <id> [YYYY-MM-DD]")
+		if err != nil {
+			return err
+		}
+		if err := s.CheckDay(id, day); err != nil {
+			return friendlyNotFound(err, "checkoff", id)
+		}
+		fmt.Printf("checked %d for %s\n", id, displayDay(day))
+		return nil
+	case "uncheck":
+		id, day, err := needCheckDay(args, "usage: rileighos checkoff uncheck <id> [YYYY-MM-DD]")
+		if err != nil {
+			return err
+		}
+		if err := s.UncheckDay(id, day); err != nil {
+			return friendlyNotFound(err, "checkoff", id)
+		}
+		fmt.Printf("unchecked %d for %s\n", id, displayDay(day))
+		return nil
+	case "delete", "del", "rm":
+		id, err := needID(args, "usage: rileighos checkoff delete <id>")
+		if err != nil {
+			return err
+		}
+		if err := s.DeleteCheckoff(id); err != nil {
+			return friendlyNotFound(err, "checkoff", id)
+		}
+		fmt.Printf("deleted checkoff %d\n", id)
+		return nil
+	default:
+		return fmt.Errorf("unknown checkoff command %q (want add, list, show, check, uncheck, delete)", cmd)
+	}
+}
+
+// needCheckDay parses "<id> [day]": the day is optional and defaults to
+// today (empty string, resolved by the store). An explicit day must at
+// least look like a date here so typos fail fast in the CLI.
+func needCheckDay(args []string, usageMsg string) (int, string, error) {
+	if len(args) < 1 || len(args) > 2 {
+		return 0, "", errors.New(usageMsg)
+	}
+	id, err := strconv.Atoi(args[0])
+	if err != nil || id <= 0 {
+		return 0, "", fmt.Errorf("invalid id %q: must be a positive number", args[0])
+	}
+	day := ""
+	if len(args) == 2 {
+		if !ValidDay(args[1]) {
+			return 0, "", fmt.Errorf("invalid day %q: want YYYY-MM-DD", args[1])
+		}
+		day = args[1]
+	}
+	return id, day, nil
+}
+
+// displayDay renders the ""-means-today convention for CLI output.
+func displayDay(day string) string {
+	if day == "" {
+		return Today()
+	}
+	return day
+}
+
+func runToday(s Store) error {
+	view, err := s.GetToday()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("today %s\n", view.Date)
+	fmt.Println("open todos:")
+	if len(view.OpenTodos) == 0 {
+		fmt.Println("  (none)")
+	} else {
+		for _, t := range view.OpenTodos {
+			fmt.Printf("  [ ] %d %s\n", t.ID, t.Content)
+		}
+	}
+	fmt.Println("check-offs:")
+	if len(view.Checkoffs) == 0 {
+		fmt.Println("  (none)")
+	} else {
+		for _, c := range view.Checkoffs {
+			box := " "
+			if c.CheckedToday {
+				box = "x"
+			}
+			fmt.Printf("  [%s] %d %s (streak %d)\n", box, c.ID, c.Name, c.Streak)
+		}
+	}
+	return nil
 }

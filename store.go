@@ -27,6 +27,24 @@ type NoteStore interface {
 	DeleteNote(id int) error
 }
 
+// CheckoffStore describes everything the app needs to do with daily
+// check-offs. Days are "YYYY-MM-DD" strings in the server's local date;
+// an empty day means Today(), so callers that mean "today" pass "" and
+// never derive the date themselves.
+//
+// Checking a day is idempotent — checking twice is the same as once — so
+// retries and double-taps cannot corrupt a streak.
+type CheckoffStore interface {
+	AddCheckoff(name string) (Checkoff, error)
+	GetCheckoffs() ([]Checkoff, error)
+	GetCheckoff(id int) (Checkoff, error)
+	DeleteCheckoff(id int) error
+	CheckDay(id int, day string) error
+	UncheckDay(id int, day string) error
+	GetCheckoffDays(id int) ([]string, error)
+	GetToday() (TodayView, error)
+}
+
 // Store is the single abstraction the rest of the program talks to.
 // Both the JSON and SQLite backends satisfy it, so switching storage
 // is a one-line change at the call site (see openStore in main.go).
@@ -34,5 +52,6 @@ type NoteStore interface {
 type Store interface {
 	TodoStore
 	NoteStore
+	CheckoffStore
 	Close() error
 }

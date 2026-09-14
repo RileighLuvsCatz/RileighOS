@@ -340,3 +340,224 @@ func mustOpenSQLite(t *testing.T) Store {
 	t.Cleanup(func() { s.Close() })
 	return s
 }
+
+func TestCheckoffAPI(t *testing.T) {
+	for _, backend := range testBackends {
+		t.Run(backend, func(t *testing.T) {
+			base := openTestServer(t, backend)
+
+			// Create.
+			status, data := doRaw(t, http.MethodPost, base+"/checkoffs", `{"name":"exercise"}`)
+			if status != http.StatusCreated {
+				t.Fatalf("POST: want 201, got %d (%s)", status, data)
+			}
+			created := decodeBody[Checkoff](t, data)
+			if created.ID <= 0 || created.Name != "exercise" {
+				t.Fatalf("unexpected created checkoff: %+v", created)
+			}
+			url := fmt.Sprintf("%s/checkoffs/%d", base, created.ID)
+
+			// Fetch one, unchecked: zero streak.
+			status, data = doRaw(t, http.MethodGet, url, "")
+			if status != http.StatusOK {
+				t.Fatalf("GET one: want 200, got %d (%s)", status, data)
+			}
+			view := decodeBody[CheckoffView](t, data)
+			if view.Streak != 0 || view.CheckedToday || len(view.Days) != 0 {
+				t.Fatalf("want fresh zero view, got %+v", view)
+			}
+
+			// Check two explicit days (deterministic streak without
+			// waiting for real consecutive days).
+			for _, day := range []string{"2026-09-12", "2026-09-13"} {
+				status, data = doRaw(t, http.MethodPost, url+"/check", fmt.Sprintf(`{"day":%q}`, day))
+				if status != http.StatusOK {
+					t.Fatalf("POST check %s: want 200, got %d (%s)", day, status, data)
+				}
+			}
+			// Double-check is idempotent, not an error.
+			if status, _ := doRaw(t, http.MethodPost, url+"/check", `{"day":"2026-09-13"}`); status != http.StatusOK {
+				t.Fatalf("POST re-check: want 200, got %d", status)
+			}
+			status, data = doRaw(t, http.MethodGet, url, "")
+			view = decodeBody[CheckoffView](t, data)
+			if status != http.StatusOK || len(view.Days) != 2 {
+				t.Fatalf("want 2 days after idempotent checks, got %+v (%s)", view, data)
+			}
+
+			// Uncheck one day.
+			if status, _ := doRaw(t, http.MethodDelete, url+"/check", `{"day":"2026-09-12"}`); status != http.StatusOK {
+				t.Fatalf("DELETE check: want 200, got %d", status)
+			}
+			status, data = doRaw(t, http.MethodGet, url, "")
+			if view = decodeBody[CheckoffView](t, data); len(view.Days) != 1 {
+				t.Fatalf("want 1 day after uncheck, got %+v", view)
+			}
+
+			// List shows the habit; delete removes it and its days.
+			status, data = doRaw(t, http.MethodGet, base+"/checkoffs", "")
+			if status != http.StatusOK {
+				t.Fatalf("GET list: want 200, got %d (%s)", status, data)
+			}
+			if got := decodeBody[[]Checkoff](t, data); len(got) != 1 {
+				t.Fatalf("want 1 checkoff, got %+v", got)
+			}
+			if status, _ := doRaw(t, http.MethodDelete, url, ""); status != http.StatusNoContent {
+				t.Fatalf("DELETE: want 204, got %d", status)
+			}
+			if status, data := doRaw(t, http.MethodGet, url, ""); status != http.StatusNotFound {
+				t.Fatalf("GET after delete: want 404, got %d (%s)", status, data)
+			}
+		})
+	}
+}
+
+func TestTodayAPI(t *testing.T) {
+	for _, backend := range testBackends {
+		t.Run(backend, func(t *testing.T) {
+			base := openTestServer(t, backend)
+
+			if status, data := doRaw(t, http.MethodPost, base+"/todos", `{"content":"open task"}`); status != http.StatusCreated {
+				t.Fatalf("POST todo: want 201, got %d (%s)", status, data)
+			}
+			status, data := doRaw(t, http.MethodPost, base+"/todos", `{"content":"done task"}`)
+			if status != http.StatusCreated {
+				t.Fatalf("POST todo: want 201, got %d (%s)", status, data)
+			}
+			doneID := decodeBody[Todo](t, data).ID
+			if status, _ := doRaw(t, http.MethodPatch, fmt.Sprintf("%s/todos/%d", base, doneID), `{"done":true}`); status != http.StatusOK {
+				t.Fatalf("PATCH done: want 200, got %d", status)
+			}
+			status, data = doRaw(t, http.MethodPost, base+"/checkoffs", `{"name":"exercise"}`)
+			if status != http.StatusCreated {
+				t.Fatalf("POST checkoff: want 201, got %d (%s)", status, data)
+			}
+			habitID := decodeBody[Checkoff](t, data).ID
+			// Empty body means today — the CLI's check path.
+			if status, _ := doRaw(t, http.MethodPost, fmt.Sprintf("%s/checkoffs/%d/check", base, habitID), ""); status != http.StatusOK {
+				t.Fatalf("POST check today: want 200, got %d", status)
+			}
+
+			status, data = doRaw(t, http.MethodGet, base+"/today", "")
+			if status != http.StatusOK {
+				t.Fatalf("GET /today: want 200, got %d (%s)", status, data)
+			}
+			view := decodeBody[TodayView](t, data)
+			if view.Date != Today() {
+				t.Fatalf("want date %s, got %s", Today(), view.Date)
+			}
+			if len(view.OpenTodos) != 1 || view.OpenTodos[0].Content != "open task" {
+				t.Fatalf("want only the open todo, got %+v", view.OpenTodos)
+			}
+			if len(view.Checkoffs) != 1 {
+				t.Fatalf("want 1 checkoff, got %+v", view.Checkoffs)
+			}
+			got := view.Checkoffs[0]
+			if !got.CheckedToday || got.Streak != 1 {
+				t.Fatalf("want checked-today streak 1, got %+v", got)
+			}
+			// Wrong method still uses the shared JSON error shape.
+			if status, _ := doRaw(t, http.MethodPost, base+"/today", ""); status != http.StatusMethodNotAllowed {
+				t.Fatalf("POST /today: want 405, got %d", status)
+			}
+		})
+	}
+}
+
+func TestCheckoffBadRequests(t *testing.T) {
+	base := openTestServer(t, "sqlite") // input validation is backend-independent
+	cases := []struct {
+		name       string
+		method     string
+		url        string
+		body       string
+		wantStatus int
+	}{
+		{"empty name", http.MethodPost, base + "/checkoffs", `{"name":""}`, http.StatusBadRequest},
+		{"blank name", http.MethodPost, base + "/checkoffs", `{"name":"   "}`, http.StatusBadRequest},
+		{"bad json", http.MethodPost, base + "/checkoffs", `not json`, http.StatusBadRequest},
+		{"missing id", http.MethodGet, base + "/checkoffs/999", "", http.StatusNotFound},
+		{"non-numeric id", http.MethodGet, base + "/checkoffs/abc", "", http.StatusBadRequest},
+		{"delete missing id", http.MethodDelete, base + "/checkoffs/999", "", http.StatusNotFound},
+		{"check missing id", http.MethodPost, base + "/checkoffs/999/check", `{"day":"2026-09-14"}`, http.StatusNotFound},
+		{"check bad day", http.MethodPost, base + "/checkoffs/1/check", `{"day":"yesterday"}`, http.StatusBadRequest},
+		{"check impossible day", http.MethodPost, base + "/checkoffs/1/check", `{"day":"2026-02-30"}`, http.StatusBadRequest},
+		{"check bad json", http.MethodPost, base + "/checkoffs/1/check", `not json`, http.StatusBadRequest},
+		{"uncheck bad day", http.MethodDelete, base + "/checkoffs/1/check", `{"day":"13-09-2026"}`, http.StatusBadRequest},
+		{"wrong method on collection", http.MethodPut, base + "/checkoffs", "", http.StatusMethodNotAllowed},
+		{"wrong method on member", http.MethodPatch, base + "/checkoffs/1", "", http.StatusMethodNotAllowed},
+		{"wrong method on check", http.MethodGet, base + "/checkoffs/1/check", "", http.StatusMethodNotAllowed},
+		{"deep path", http.MethodGet, base + "/checkoffs/1/check/extra", "", http.StatusNotFound},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			status, data := doRaw(t, tc.method, tc.url, tc.body)
+			if status != tc.wantStatus {
+				t.Fatalf("%s %s: want %d, got %d (%s)", tc.method, tc.url, tc.wantStatus, status, data)
+			}
+			if status >= 400 {
+				se := decodeBody[serverError](t, data)
+				if strings.TrimSpace(se.Error) == "" {
+					t.Fatalf("%s %s: want non-empty error message, got %s", tc.method, tc.url, data)
+				}
+			}
+		})
+	}
+}
+
+// TestClientCheckoffRoundTrip runs the checkoff contract plus /today
+// through the HTTP client, mirroring what the new CLI commands do.
+func TestClientCheckoffRoundTrip(t *testing.T) {
+	for _, backend := range testBackends {
+		t.Run(backend, func(t *testing.T) {
+			c := NewClient(openTestServer(t, backend))
+			defer c.Close()
+
+			habit, err := c.AddCheckoff("exercise")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := c.AddCheckoff(""); err == nil {
+				t.Fatal("want error for blank checkoff over HTTP")
+			}
+			if err := c.CheckDay(habit.ID, "2026-09-12"); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.CheckDay(habit.ID, ""); err != nil { // empty means today
+				t.Fatal(err)
+			}
+			days, err := c.GetCheckoffDays(habit.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(days) != 2 || days[len(days)-1] != Today() {
+				t.Fatalf("want 2 days ending today, got %v", days)
+			}
+			if err := c.UncheckDay(habit.ID, "2026-09-12"); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.CheckDay(999, "2026-09-14"); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("want ErrNotFound, got %v", err)
+			}
+
+			view, err := c.GetToday()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if view.Date != Today() || len(view.Checkoffs) != 1 {
+				t.Fatalf("unexpected today view: %+v", view)
+			}
+			got := view.Checkoffs[0]
+			if !got.CheckedToday || got.Streak != 1 {
+				t.Fatalf("want checked-today streak 1, got %+v", got)
+			}
+
+			if err := c.DeleteCheckoff(habit.ID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := c.GetCheckoff(habit.ID); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("want ErrNotFound, got %v", err)
+			}
+		})
+	}
+}
