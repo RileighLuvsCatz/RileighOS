@@ -14,6 +14,7 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"net/http"
@@ -21,6 +22,11 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"rdb/rileighos/internal/client"
+	"rdb/rileighos/internal/models"
+	"rdb/rileighos/internal/server"
+	"rdb/rileighos/internal/store"
 )
 
 const usage = `rileighos — personal ADHD productivity tool (phase 2: client/server)
@@ -62,6 +68,14 @@ checkoff commands:
   rileighos checkoff delete <id>
 
   rileighos today                      open todos + check-off streaks
+
+canvas commands (needs RILEIGHOS_CANVAS_TOKEN on the server):
+  rileighos canvas sync                import published assignments
+                                       (asks about new courses; empty answer
+                                       asks again next sync)
+  rileighos canvas courses             list tracked courses and gating state
+  rileighos canvas exclude <code|id>   never import a course
+  rileighos canvas include <code|id>   import a course (clears pending)
 `
 
 func main() {
@@ -107,29 +121,33 @@ func run(args []string) error {
 	case "serve":
 		return runServe(args)
 	case "todo", "todos":
-		client := NewClient(serverURL)
+		client := client.NewClient(serverURL)
 		defer client.Close()
 		return runTodo(client, args)
 	case "note", "notes":
-		client := NewClient(serverURL)
+		client := client.NewClient(serverURL)
 		defer client.Close()
 		return runNote(client, args)
 	case "checkoff", "checkoffs":
-		client := NewClient(serverURL)
+		client := client.NewClient(serverURL)
 		defer client.Close()
 		return runCheckoff(client, args)
 	case "today":
 		if len(args) != 0 {
 			return errors.New("usage: rileighos today")
 		}
-		client := NewClient(serverURL)
+		client := client.NewClient(serverURL)
 		defer client.Close()
 		return runToday(client)
+	case "canvas":
+		client := client.NewClient(serverURL)
+		defer client.Close()
+		return runCanvas(client, args)
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		return nil
 	default:
-		return fmt.Errorf("unknown resource %q (want serve, todo, note, checkoff or today)\n\n%s", resource, usage)
+		return fmt.Errorf("unknown resource %q (want serve, todo, note, checkoff, canvas or today)\n\n%s", resource, usage)
 	}
 }
 
@@ -191,7 +209,7 @@ func runServe(args []string) error {
 
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           NewServer(store).Handler(),
+		Handler:           server.NewServer(store).Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	// A bare ":8080" means all interfaces; render it as localhost so the
@@ -207,18 +225,18 @@ func runServe(args []string) error {
 // openStore is the single place where the storage backend is chosen.
 // Only runServe calls it — the todo/note CLI paths talk HTTP and never
 // touch a backend directly.
-func openStore(backend, dbPath, jsonPath string) (Store, error) {
+func openStore(backend, dbPath, jsonPath string) (store.FullStore, error) {
 	switch strings.ToLower(backend) {
 	case "sqlite":
-		return OpenSQLiteStore(dbPath)
+		return store.OpenSQLiteStore(dbPath)
 	case "json":
-		return OpenJSONStore(jsonPath)
+		return store.OpenJSONStore(jsonPath)
 	default:
 		return nil, fmt.Errorf("unknown backend %q (want sqlite or json)", backend)
 	}
 }
 
-func runTodo(s Store, args []string) error {
+func runTodo(s store.Store, args []string) error {
 	if len(args) == 0 {
 		return errors.New("todo needs a command: add, list, done, undone, delete")
 	}
@@ -306,7 +324,7 @@ func runTodo(s Store, args []string) error {
 	}
 }
 
-func runNote(s Store, args []string) error {
+func runNote(s store.Store, args []string) error {
 	if len(args) == 0 {
 		return errors.New("note needs a command: add, list, show, delete")
 	}
@@ -376,7 +394,7 @@ func needID(args []string, usageMsg string) (int, error) {
 }
 
 func friendlyNotFound(err error, kind string, id int) error {
-	if errors.Is(err, ErrNotFound) {
+	if errors.Is(err, store.ErrNotFound) {
 		return fmt.Errorf("%s %d does not exist", kind, id)
 	}
 	return err
@@ -396,7 +414,7 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
-func runCheckoff(s Store, args []string) error {
+func runCheckoff(s store.Store, args []string) error {
 	if len(args) == 0 {
 		return errors.New("checkoff needs a command: add, list, show, check, uncheck, delete")
 	}
@@ -431,12 +449,12 @@ func runCheckoff(s Store, args []string) error {
 			}
 			box := " "
 			for _, d := range days {
-				if d == Today() {
+				if d == store.Today() {
 					box = "x"
 					break
 				}
 			}
-			fmt.Printf("[%s] %d %s (streak %d)\n", box, c.ID, c.Name, CurrentStreak(days, Today()))
+			fmt.Printf("[%s] %d %s (streak %d)\n", box, c.ID, c.Name, store.CurrentStreak(days, store.Today()))
 		}
 		return nil
 	case "show", "get":
@@ -452,7 +470,7 @@ func runCheckoff(s Store, args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("%d %s (streak %d)\n", c.ID, c.Name, CurrentStreak(days, Today()))
+		fmt.Printf("%d %s (streak %d)\n", c.ID, c.Name, store.CurrentStreak(days, store.Today()))
 		if len(days) == 0 {
 			fmt.Println("no days checked yet")
 		} else {
@@ -507,7 +525,7 @@ func needCheckDay(args []string, usageMsg string) (int, string, error) {
 	}
 	day := ""
 	if len(args) == 2 {
-		if !ValidDay(args[1]) {
+		if !store.ValidDay(args[1]) {
 			return 0, "", fmt.Errorf("invalid day %q: want YYYY-MM-DD", args[1])
 		}
 		day = args[1]
@@ -518,12 +536,12 @@ func needCheckDay(args []string, usageMsg string) (int, string, error) {
 // displayDay renders the ""-means-today convention for CLI output.
 func displayDay(day string) string {
 	if day == "" {
-		return Today()
+		return store.Today()
 	}
 	return day
 }
 
-func runToday(s Store) error {
+func runToday(s store.Store) error {
 	view, err := s.GetToday()
 	if err != nil {
 		return err
@@ -549,5 +567,140 @@ func runToday(s Store) error {
 			fmt.Printf("  [%s] %d %s (streak %d)\n", box, c.ID, c.Name, c.Streak)
 		}
 	}
+	return nil
+}
+
+func runCanvas(s client.CanvasSyncer, args []string) error {
+	if len(args) == 0 {
+		return errors.New("canvas needs a command: sync, courses, exclude, include")
+	}
+	cmd, args := strings.ToLower(args[0]), args[1:]
+	switch cmd {
+	case "sync":
+		if len(args) != 0 {
+			return errors.New("usage: rileighos canvas sync")
+		}
+		return runCanvasSync(s)
+	case "courses", "list", "ls":
+		if len(args) != 0 {
+			return errors.New("usage: rileighos canvas courses")
+		}
+		return runCanvasCourses(s)
+	case "exclude", "ignore":
+		if len(args) != 1 {
+			return errors.New("usage: rileighos canvas exclude <code|id>")
+		}
+		return runCanvasResolve(s, args[0], true)
+	case "include", "unexclude":
+		if len(args) != 1 {
+			return errors.New("usage: rileighos canvas include <code|id>")
+		}
+		return runCanvasResolve(s, args[0], false)
+	default:
+		return fmt.Errorf("unknown canvas command %q (want sync, courses, exclude, include)", cmd)
+	}
+}
+
+// runCanvasSync refreshes the course list, prompts over pending courses,
+// then imports. Prompt answers: y = include, n = exclude, empty (or EOF
+// on a pipe) = decide later; later answers stay pending for the next sync.
+func runCanvasSync(s client.CanvasSyncer) error {
+	courses, err := s.GetCanvasCourses()
+	if err != nil {
+		return err
+	}
+	decisions := models.SyncDecisions{}
+	reader := bufio.NewReader(os.Stdin)
+	for _, c := range courses {
+		if !c.PendingConfirm {
+			continue
+		}
+		fmt.Printf("Import course %s (%s)? [y]es / [n]o / [Enter] later: ", c.Code, c.Name)
+		line, err := reader.ReadString('\n')
+		answer := strings.ToLower(strings.TrimSpace(line))
+		if err != nil && len(line) == 0 {
+			continue // EOF: non-interactive, leave pending
+		}
+		switch answer {
+		case "y", "yes":
+			decisions[c.CourseID] = false
+		case "n", "no":
+			decisions[c.CourseID] = true
+		}
+	}
+	res, err := s.SyncCanvas(decisions)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("imported %d, updated %d, completed %d, reopened %d, skipped %d\n",
+		res.Imported, res.Updated, res.Completed, res.Reopened, res.Skipped)
+	if len(res.PendingCourses) > 0 {
+		fmt.Println("still pending (sync again to decide):")
+		for _, c := range res.PendingCourses {
+			fmt.Printf("  %d %s (%s)\n", c.CourseID, c.Code, c.Name)
+		}
+	}
+	return nil
+}
+
+func runCanvasCourses(s client.CanvasSyncer) error {
+	courses, err := s.GetCanvasCourses()
+	if err != nil {
+		return err
+	}
+	if len(courses) == 0 {
+		fmt.Println("(no courses tracked yet — run `rileighos canvas sync`)")
+		return nil
+	}
+	for _, c := range courses {
+		state := "active"
+		switch {
+		case c.Excluded:
+			state = "excluded"
+		case c.PendingConfirm:
+			state = "pending"
+		}
+		fmt.Printf("%d %s (%s) [%s]\n", c.CourseID, c.Code, c.Name, state)
+	}
+	return nil
+}
+
+// findCanvasCourse resolves a <code|id> argument against the tracked list:
+// numeric input matches the Canvas course ID, anything else matches the
+// course code case-insensitively.
+func findCanvasCourse(courses []models.CanvasCourse, arg string) (models.CanvasCourse, error) {
+	if id, err := strconv.ParseInt(arg, 10, 64); err == nil {
+		for _, c := range courses {
+			if c.CourseID == id {
+				return c, nil
+			}
+		}
+		return models.CanvasCourse{}, fmt.Errorf("no tracked course with id %d (see `rileighos canvas courses`)", id)
+	}
+	for _, c := range courses {
+		if strings.EqualFold(c.Code, arg) {
+			return c, nil
+		}
+	}
+	return models.CanvasCourse{}, fmt.Errorf("no tracked course %q (see `rileighos canvas courses`)", arg)
+}
+
+func runCanvasResolve(s client.CanvasSyncer, arg string, excluded bool) error {
+	courses, err := s.GetCanvasCourses()
+	if err != nil {
+		return err
+	}
+	c, err := findCanvasCourse(courses, arg)
+	if err != nil {
+		return err
+	}
+	if _, err := s.ResolveCanvasCourse(c.CourseID, excluded); err != nil {
+		return err
+	}
+	verb := "included"
+	if excluded {
+		verb = "excluded"
+	}
+	fmt.Printf("course %s (%s) %s\n", c.Code, c.Name, verb)
 	return nil
 }

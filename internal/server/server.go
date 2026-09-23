@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"encoding/json"
@@ -8,6 +8,12 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
+
+	"rdb/rileighos/internal/api"
+	"rdb/rileighos/internal/canvas"
+	"rdb/rileighos/internal/models"
+	"rdb/rileighos/internal/store"
 )
 
 // Server wraps a Store in a small JSON-over-HTTP API using only net/http
@@ -31,6 +37,17 @@ import (
 //	DELETE /checkoffs/{id}/check   uncheck a day, same body shape -> 200
 //	GET    /today          "what does my day look like": open todos plus
 //	                       check-offs with streaks, in one call
+//	GET    /canvas/courses refresh the tracked course list from Canvas
+//	                       (new courses arrive pending_confirm)
+//	PATCH  /canvas/courses/{id} resolve one course, body {"excluded": bool}
+//	POST   /canvas/sync    import published assignments, body
+//	                       {"decisions": {"<course_id>": bool}} mapping
+//	                       course ID -> excluded; absent entries stay pending
+//
+// Canvas routes need RILEIGHOS_CANVAS_TOKEN (and optionally
+// RILEIGHOS_CANVAS_BASE_URL, defaulting to uwmil.instructure.com). Without
+// a token they answer 501: deployed but not configured. Upstream Canvas
+// failures answer 502; the token never appears in any response.
 //
 // Notes intentionally have no PATCH route: they carry no done state and
 // the Store has no content-update operation, so there is nothing mutable
@@ -42,14 +59,14 @@ import (
 // wrong method. Methods are dispatched by hand (rather than with the mux's
 // "METHOD /path" patterns) precisely so that even the 405s use this shape.
 type Server struct {
-	store Store
+	store store.FullStore
 	mux   *http.ServeMux
 }
 
 // NewServer builds the route table around store. The server itself is an
 // http.Handler, so the caller just serves it, e.g.
 // http.ListenAndServe(addr, NewServer(store)).
-func NewServer(store Store) *Server {
+func NewServer(store store.FullStore) *Server {
 	s := &Server{store: store, mux: http.NewServeMux()}
 	s.mux.HandleFunc("/healthz", s.handleHealth)
 	s.mux.HandleFunc("/todos", s.handleTodos)
@@ -59,6 +76,9 @@ func NewServer(store Store) *Server {
 	s.mux.HandleFunc("/checkoffs", s.handleCheckoffs)
 	s.mux.HandleFunc("/checkoffs/", s.handleCheckoffByID)
 	s.mux.HandleFunc("/today", s.handleToday)
+	s.mux.HandleFunc("/canvas/courses", s.handleCanvasCourses)
+	s.mux.HandleFunc("/canvas/courses/", s.handleCanvasCourseByID)
+	s.mux.HandleFunc("/canvas/sync", s.handleCanvasSync)
 	return s
 }
 
@@ -71,23 +91,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.Serve
 
 // --- helpers ---
 
-// errorBody is the single error response shape used by every endpoint.
-type errorBody struct {
-	Error string `json:"error"`
-}
-
-// contentBody is the single create-request shape: POST /todos and
-// POST /notes both take {"content": "..."}.
-type contentBody struct {
-	Content string `json:"content"`
-}
-
-// todoPatch is the PATCH /todos/{id} request shape. Done is a pointer so
-// a missing field is distinguishable from an explicit false.
-type todoPatch struct {
-	Done *bool `json:"done"`
-}
-
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -98,13 +101,13 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func writeError(w http.ResponseWriter, status int, format string, args ...any) {
-	writeJSON(w, status, errorBody{Error: fmt.Sprintf(format, args...)})
+	writeJSON(w, status, api.ErrorBody{Error: fmt.Sprintf(format, args...)})
 }
 
 // writeStoreError maps Store failures to status codes: unknown IDs become
 // 404 (mirroring ErrNotFound), everything else is a 500.
 func writeStoreError(w http.ResponseWriter, err error) {
-	if errors.Is(err, ErrNotFound) {
+	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "%s", err)
 		return
 	}
@@ -115,7 +118,7 @@ func writeStoreError(w http.ResponseWriter, err error) {
 // misbehaving client cannot make us buffer unbounded input.
 func decodeContent(r *http.Request) (string, error) {
 	r.Body = http.MaxBytesReader(nil, r.Body, 1<<20)
-	var b contentBody
+	var b api.ContentBody
 	if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
 		return "", err
 	}
@@ -247,7 +250,7 @@ func (s *Server) getTodo(w http.ResponseWriter, id int) {
 
 func (s *Server) patchTodo(w http.ResponseWriter, r *http.Request, id int) {
 	r.Body = http.MaxBytesReader(nil, r.Body, 1<<20)
-	var p todoPatch
+	var p api.TodoPatch
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body: %s", err)
 		return
@@ -322,25 +325,6 @@ func (s *Server) handleNoteByID(w http.ResponseWriter, r *http.Request) {
 
 // --- checkoffs ---
 
-// nameBody is the POST /checkoffs request shape.
-type nameBody struct {
-	Name string `json:"name"`
-}
-
-// checkBody is the check/uncheck request shape. An empty day means today;
-// an explicit day enables backfill and (more importantly) deterministic
-// tests of streaks that would otherwise need consecutive real days.
-type checkBody struct {
-	Day string `json:"day"`
-}
-
-// checkoffView aliases the shared CheckoffView model: the GET
-// /checkoffs/{id} response shape.
-type checkoffView = CheckoffView
-
-// todayView aliases the shared TodayView model: the GET /today response.
-type todayView = TodayView
-
 // handleCheckoffs dispatches the /checkoffs collection route.
 func (s *Server) handleCheckoffs(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
@@ -353,7 +337,7 @@ func (s *Server) handleCheckoffs(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, checkoffs)
 	case http.MethodPost:
 		r.Body = http.MaxBytesReader(nil, r.Body, 1<<20)
-		var b nameBody
+		var b api.NameBody
 		if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid request body: %s", err)
 			return
@@ -391,7 +375,7 @@ func (s *Server) handleCheckoffByID(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		view, err := s.viewCheckoff(id, Today())
+		view, err := s.viewCheckoff(id, store.Today())
 		if err != nil {
 			writeStoreError(w, err)
 			return
@@ -420,7 +404,7 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request, id int) {
 		return
 	}
 	r.Body = http.MaxBytesReader(nil, r.Body, 1<<20)
-	var b checkBody
+	var b api.CheckBody
 	// An empty body just means "today" — but it must still be valid JSON
 	// when present, so only tolerate EOF, not garbage.
 	if err := json.NewDecoder(r.Body).Decode(&b); err != nil && err != io.EOF {
@@ -429,9 +413,9 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request, id int) {
 	}
 	day := b.Day
 	if day == "" {
-		day = Today()
+		day = store.Today()
 	}
-	if !ValidDay(day) {
+	if !store.ValidDay(day) {
 		writeError(w, http.StatusBadRequest, "invalid day %q: want YYYY-MM-DD", b.Day)
 		return
 	}
@@ -445,7 +429,7 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request, id int) {
 		writeStoreError(w, err)
 		return
 	}
-	view, err := s.viewCheckoff(id, Today())
+	view, err := s.viewCheckoff(id, store.Today())
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -454,14 +438,14 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request, id int) {
 }
 
 // viewCheckoff builds the derived view for one checkoff as of today.
-func (s *Server) viewCheckoff(id int, today string) (checkoffView, error) {
+func (s *Server) viewCheckoff(id int, today string) (models.CheckoffView, error) {
 	c, err := s.store.GetCheckoff(id)
 	if err != nil {
-		return checkoffView{}, err
+		return models.CheckoffView{}, err
 	}
 	days, err := s.store.GetCheckoffDays(id)
 	if err != nil {
-		return checkoffView{}, err
+		return models.CheckoffView{}, err
 	}
 	checked := false
 	for _, d := range days {
@@ -470,10 +454,10 @@ func (s *Server) viewCheckoff(id int, today string) (checkoffView, error) {
 			break
 		}
 	}
-	return checkoffView{
+	return models.CheckoffView{
 		Checkoff:     c,
 		Days:         days,
-		Streak:       CurrentStreak(days, today),
+		Streak:       store.CurrentStreak(days, today),
 		CheckedToday: checked,
 	}, nil
 }
@@ -520,4 +504,134 @@ func (s *Server) handleCreateNote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, n)
+}
+
+// --- canvas ---
+
+// writeCanvasError maps sync failures: upstream Canvas problems become 502,
+// store failures keep the shared mapping. Canvas errors never contain the
+// token by construction (see CanvasClient).
+func writeCanvasError(w http.ResponseWriter, err error) {
+	if errors.Is(err, canvas.ErrCanvasUpstream) {
+		writeError(w, http.StatusBadGateway, "%s", err)
+		return
+	}
+	writeStoreError(w, err)
+}
+
+// handleCanvasCourses serves GET /canvas/courses: refresh the tracked
+// course list from Canvas (new courses arrive pending_confirm) and return
+// the full gating state for the CLI to prompt over.
+func (s *Server) handleCanvasCourses(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, r, http.MethodGet)
+		return
+	}
+	cv, err := canvas.NewCanvasClientFromEnv()
+	if err != nil {
+		writeError(w, http.StatusNotImplemented, "%s", err)
+		return
+	}
+	upstream, err := cv.GetCourses()
+	if err != nil {
+		writeCanvasError(w, err)
+		return
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, info := range upstream {
+		if _, err := s.store.UpsertCanvasCourse(models.CanvasCourse{
+			CourseID: info.ID, Code: info.Code, Name: info.Name,
+			Excluded: false, PendingConfirm: true, LastSeen: now,
+		}); err != nil {
+			writeStoreError(w, err)
+			return
+		}
+	}
+	courses, err := s.store.GetCanvasCourses()
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, courses)
+}
+
+// handleCanvasCourseByID serves PATCH /canvas/courses/{id}: record the
+// user's include/exclude decision, clearing pending_confirm.
+func (s *Server) handleCanvasCourseByID(w http.ResponseWriter, r *http.Request) {
+	raw, ok := memberID(w, r.URL.Path, "/canvas/courses/", "canvas course")
+	if !ok {
+		return
+	}
+	if r.Method != http.MethodPatch {
+		methodNotAllowed(w, r, http.MethodPatch)
+		return
+	}
+	id, ok := pathID(w, raw, "canvas course")
+	if !ok {
+		return
+	}
+	r.Body = http.MaxBytesReader(nil, r.Body, 1<<20)
+	var b api.CourseResolve
+	if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body: %s", err)
+		return
+	}
+	if b.Excluded == nil {
+		writeError(w, http.StatusBadRequest, `nothing to update: body must set "excluded"`)
+		return
+	}
+	if err := s.store.ResolveCanvasCourse(int64(id), *b.Excluded); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	courses, err := s.store.GetCanvasCourses()
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	for _, c := range courses {
+		if c.CourseID == int64(id) {
+			writeJSON(w, http.StatusOK, c)
+			return
+		}
+	}
+	writeStoreError(w, fmt.Errorf("canvas course %d: %w", id, store.ErrNotFound))
+}
+
+// handleCanvasSync serves POST /canvas/sync: apply decisions, then import.
+// It answers with the SyncResult summary the CLI prints.
+func (s *Server) handleCanvasSync(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w, r, http.MethodPost)
+		return
+	}
+	cv, err := canvas.NewCanvasClientFromEnv()
+	if err != nil {
+		writeError(w, http.StatusNotImplemented, "%s", err)
+		return
+	}
+	r.Body = http.MaxBytesReader(nil, r.Body, 1<<20)
+	var b api.SyncRequest
+	if err := json.NewDecoder(r.Body).Decode(&b); err != nil && err != io.EOF {
+		writeError(w, http.StatusBadRequest, "invalid request body: %s", err)
+		return
+	}
+	decisions := models.SyncDecisions{}
+	for raw, excluded := range b.Decisions {
+		id, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || id <= 0 {
+			writeError(w, http.StatusBadRequest, "invalid course id %q: must be a positive number", raw)
+			return
+		}
+		decisions[id] = excluded
+	}
+	res, err := canvas.RunCanvasSync(s.store, cv, decisions)
+	if err != nil {
+		writeCanvasError(w, err)
+		return
+	}
+	if res.PendingCourses == nil {
+		res.PendingCourses = []models.CanvasCourse{}
+	}
+	writeJSON(w, http.StatusOK, res)
 }

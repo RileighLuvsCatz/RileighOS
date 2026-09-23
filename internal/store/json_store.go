@@ -1,4 +1,4 @@
-package main
+package store
 
 import (
 	"encoding/json"
@@ -8,18 +8,22 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"rdb/rileighos/internal/models"
 )
 
 // jsonFile is the on-disk shape of the JSON backend: both collections
 // plus the next IDs, so IDs stay unique across restarts.
 type jsonFile struct {
-	Todos          []Todo        `json:"todos"`
-	Notes          []Note        `json:"notes"`
-	Checkoffs      []Checkoff    `json:"checkoffs"`
-	CheckoffDays   []CheckoffDay `json:"checkoff_days"`
-	NextTodoID     int           `json:"next_todo_id"`
-	NextNoteID     int           `json:"next_note_id"`
-	NextCheckoffID int           `json:"next_checkoff_id"`
+	Todos          []models.Todo         `json:"todos"`
+	Notes          []models.Note         `json:"notes"`
+	Checkoffs      []models.Checkoff     `json:"checkoffs"`
+	CheckoffDays   []CheckoffDay         `json:"checkoff_days"`
+	CanvasCourses  []models.CanvasCourse `json:"canvas_courses"`
+	CanvasLastSync string                `json:"canvas_last_sync"`
+	NextTodoID     int                   `json:"next_todo_id"`
+	NextNoteID     int                   `json:"next_note_id"`
+	NextCheckoffID int                   `json:"next_checkoff_id"`
 }
 
 // CheckoffDay is one checked day for one checkoff. Days live as a flat
@@ -36,10 +40,12 @@ type CheckoffDay struct {
 type JSONStore struct {
 	mu             sync.Mutex
 	path           string
-	todos          []Todo
-	notes          []Note
-	checkoffs      []Checkoff
+	todos          []models.Todo
+	notes          []models.Note
+	checkoffs      []models.Checkoff
 	days           []CheckoffDay
+	canvasCourses  []models.CanvasCourse
+	canvasLastSync string
 	nextTodoID     int
 	nextNoteID     int
 	nextCheckoffID int
@@ -47,6 +53,9 @@ type JSONStore struct {
 
 // Compile-time check that JSONStore satisfies Store.
 var _ Store = (*JSONStore)(nil)
+
+// Compile-time check that JSONStore satisfies FullStore (Canvas sync).
+var _ FullStore = (*JSONStore)(nil)
 
 // OpenJSONStore loads (or creates) the JSON file at path.
 func OpenJSONStore(path string) (*JSONStore, error) {
@@ -76,6 +85,8 @@ func (s *JSONStore) load() error {
 	s.notes = f.Notes
 	s.checkoffs = f.Checkoffs
 	s.days = f.CheckoffDays
+	s.canvasCourses = f.CanvasCourses
+	s.canvasLastSync = f.CanvasLastSync
 	s.nextTodoID = max(f.NextTodoID, 1)
 	s.nextNoteID = max(f.NextNoteID, 1)
 	s.nextCheckoffID = max(f.NextCheckoffID, 1)
@@ -90,16 +101,19 @@ func (s *JSONStore) load() error {
 		s.nextCheckoffID = max(s.nextCheckoffID, c.ID+1)
 	}
 	if s.todos == nil {
-		s.todos = []Todo{}
+		s.todos = []models.Todo{}
 	}
 	if s.notes == nil {
-		s.notes = []Note{}
+		s.notes = []models.Note{}
 	}
 	if s.checkoffs == nil {
-		s.checkoffs = []Checkoff{}
+		s.checkoffs = []models.Checkoff{}
 	}
 	if s.days == nil {
 		s.days = []CheckoffDay{}
+	}
+	if s.canvasCourses == nil {
+		s.canvasCourses = []models.CanvasCourse{}
 	}
 	return nil
 }
@@ -111,6 +125,8 @@ func (s *JSONStore) save() error {
 		Notes:          s.notes,
 		Checkoffs:      s.checkoffs,
 		CheckoffDays:   s.days,
+		CanvasCourses:  s.canvasCourses,
+		CanvasLastSync: s.canvasLastSync,
 		NextTodoID:     s.nextTodoID,
 		NextNoteID:     s.nextNoteID,
 		NextCheckoffID: s.nextCheckoffID,
@@ -133,30 +149,30 @@ func (s *JSONStore) save() error {
 // satisfies the Store interface uniformly with SQLiteStore.
 func (s *JSONStore) Close() error { return nil }
 
-func (s *JSONStore) AddTodo(content string) (Todo, error) {
+func (s *JSONStore) AddTodo(content string) (models.Todo, error) {
 	if strings.TrimSpace(content) == "" {
-		return Todo{}, fmt.Errorf("todo content must not be empty")
+		return models.Todo{}, fmt.Errorf("todo content must not be empty")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	t := Todo{ID: s.nextTodoID, Content: content, CreatedAt: time.Now()}
+	t := models.Todo{ID: s.nextTodoID, Content: content, CreatedAt: time.Now()}
 	s.nextTodoID++
 	s.todos = append(s.todos, t)
 	if err := s.save(); err != nil {
-		return Todo{}, err
+		return models.Todo{}, err
 	}
 	return t, nil
 }
 
-func (s *JSONStore) GetTodos() ([]Todo, error) {
+func (s *JSONStore) GetTodos() ([]models.Todo, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := make([]Todo, len(s.todos))
+	out := make([]models.Todo, len(s.todos))
 	copy(out, s.todos)
 	return out, nil
 }
 
-func (s *JSONStore) GetTodo(id int) (Todo, error) {
+func (s *JSONStore) GetTodo(id int) (models.Todo, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, t := range s.todos {
@@ -164,7 +180,7 @@ func (s *JSONStore) GetTodo(id int) (Todo, error) {
 			return t, nil
 		}
 	}
-	return Todo{}, fmt.Errorf("todo %d: %w", id, ErrNotFound)
+	return models.Todo{}, fmt.Errorf("todo %d: %w", id, ErrNotFound)
 }
 
 func (s *JSONStore) MarkTodoDone(id int) error {
@@ -199,30 +215,30 @@ func (s *JSONStore) DeleteTodo(id int) error {
 	return fmt.Errorf("todo %d: %w", id, ErrNotFound)
 }
 
-func (s *JSONStore) AddNote(content string) (Note, error) {
+func (s *JSONStore) AddNote(content string) (models.Note, error) {
 	if strings.TrimSpace(content) == "" {
-		return Note{}, fmt.Errorf("note content must not be empty")
+		return models.Note{}, fmt.Errorf("note content must not be empty")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	n := Note{ID: s.nextNoteID, Content: content, CreatedAt: time.Now()}
+	n := models.Note{ID: s.nextNoteID, Content: content, CreatedAt: time.Now()}
 	s.nextNoteID++
 	s.notes = append(s.notes, n)
 	if err := s.save(); err != nil {
-		return Note{}, err
+		return models.Note{}, err
 	}
 	return n, nil
 }
 
-func (s *JSONStore) GetNotes() ([]Note, error) {
+func (s *JSONStore) GetNotes() ([]models.Note, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := make([]Note, len(s.notes))
+	out := make([]models.Note, len(s.notes))
 	copy(out, s.notes)
 	return out, nil
 }
 
-func (s *JSONStore) GetNote(id int) (Note, error) {
+func (s *JSONStore) GetNote(id int) (models.Note, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, n := range s.notes {
@@ -230,7 +246,7 @@ func (s *JSONStore) GetNote(id int) (Note, error) {
 			return n, nil
 		}
 	}
-	return Note{}, fmt.Errorf("note %d: %w", id, ErrNotFound)
+	return models.Note{}, fmt.Errorf("note %d: %w", id, ErrNotFound)
 }
 
 func (s *JSONStore) DeleteNote(id int) error {
@@ -245,30 +261,30 @@ func (s *JSONStore) DeleteNote(id int) error {
 	return fmt.Errorf("note %d: %w", id, ErrNotFound)
 }
 
-func (s *JSONStore) AddCheckoff(name string) (Checkoff, error) {
+func (s *JSONStore) AddCheckoff(name string) (models.Checkoff, error) {
 	if strings.TrimSpace(name) == "" {
-		return Checkoff{}, fmt.Errorf("checkoff name must not be empty")
+		return models.Checkoff{}, fmt.Errorf("checkoff name must not be empty")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	c := Checkoff{ID: s.nextCheckoffID, Name: name, CreatedAt: time.Now()}
+	c := models.Checkoff{ID: s.nextCheckoffID, Name: name, CreatedAt: time.Now()}
 	s.nextCheckoffID++
 	s.checkoffs = append(s.checkoffs, c)
 	if err := s.save(); err != nil {
-		return Checkoff{}, err
+		return models.Checkoff{}, err
 	}
 	return c, nil
 }
 
-func (s *JSONStore) GetCheckoffs() ([]Checkoff, error) {
+func (s *JSONStore) GetCheckoffs() ([]models.Checkoff, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := make([]Checkoff, len(s.checkoffs))
+	out := make([]models.Checkoff, len(s.checkoffs))
 	copy(out, s.checkoffs)
 	return out, nil
 }
 
-func (s *JSONStore) GetCheckoff(id int) (Checkoff, error) {
+func (s *JSONStore) GetCheckoff(id int) (models.Checkoff, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, c := range s.checkoffs {
@@ -276,7 +292,7 @@ func (s *JSONStore) GetCheckoff(id int) (Checkoff, error) {
 			return c, nil
 		}
 	}
-	return Checkoff{}, fmt.Errorf("checkoff %d: %w", id, ErrNotFound)
+	return models.Checkoff{}, fmt.Errorf("checkoff %d: %w", id, ErrNotFound)
 }
 
 func (s *JSONStore) DeleteCheckoff(id int) error {
@@ -371,18 +387,18 @@ func (s *JSONStore) GetCheckoffDays(id int) ([]string, error) {
 	return days, nil
 }
 
-func (s *JSONStore) GetToday() (TodayView, error) {
+func (s *JSONStore) GetToday() (models.TodayView, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	today := Today()
 
-	open := []Todo{}
+	open := []models.Todo{}
 	for _, t := range s.todos {
 		if !t.Done {
 			open = append(open, t)
 		}
 	}
-	views := []CheckoffView{}
+	views := []models.CheckoffView{}
 	for _, c := range s.checkoffs {
 		days := []string{}
 		for _, d := range s.days {
@@ -392,14 +408,14 @@ func (s *JSONStore) GetToday() (TodayView, error) {
 		}
 		sort.Strings(days)
 		checkedToday := len(days) > 0 && days[len(days)-1] == today
-		views = append(views, CheckoffView{
+		views = append(views, models.CheckoffView{
 			Checkoff:     c,
 			Days:         days,
 			Streak:       CurrentStreak(days, today),
 			CheckedToday: checkedToday,
 		})
 	}
-	return TodayView{Date: today, OpenTodos: open, Checkoffs: views}, nil
+	return models.TodayView{Date: today, OpenTodos: open, Checkoffs: views}, nil
 }
 
 // hasCheckoff reports whether the checkoff exists. Caller must hold s.mu.
@@ -410,4 +426,161 @@ func (s *JSONStore) hasCheckoff(id int) bool {
 		}
 	}
 	return false
+}
+
+// --- Canvas sync support ---
+
+func (s *JSONStore) GetCanvasCourses() ([]models.CanvasCourse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]models.CanvasCourse, len(s.canvasCourses))
+	copy(out, s.canvasCourses)
+	sort.Slice(out, func(i, j int) bool { return out[i].Code < out[j].Code })
+	return out, nil
+}
+
+func (s *JSONStore) UpsertCanvasCourse(c models.CanvasCourse) (models.CanvasCourse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.canvasCourses {
+		if s.canvasCourses[i].CourseID == c.CourseID {
+			// Preserve the user's decision; refresh upstream facts only.
+			s.canvasCourses[i].Code = c.Code
+			s.canvasCourses[i].Name = c.Name
+			s.canvasCourses[i].LastSeen = c.LastSeen
+			got := s.canvasCourses[i]
+			if err := s.save(); err != nil {
+				return models.CanvasCourse{}, err
+			}
+			return got, nil
+		}
+	}
+	s.canvasCourses = append(s.canvasCourses, c)
+	if err := s.save(); err != nil {
+		return models.CanvasCourse{}, err
+	}
+	return c, nil
+}
+
+func (s *JSONStore) ResolveCanvasCourse(courseID int64, excluded bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.canvasCourses {
+		if s.canvasCourses[i].CourseID == courseID {
+			s.canvasCourses[i].Excluded = excluded
+			s.canvasCourses[i].PendingConfirm = false
+			return s.save()
+		}
+	}
+	return fmt.Errorf("canvas course %d: %w", courseID, ErrNotFound)
+}
+
+func (s *JSONStore) AddCanvasTodo(content string, dueAt *time.Time, assignmentID int64, courseCode, url, updatedAt string) (models.Todo, error) {
+	if strings.TrimSpace(content) == "" {
+		return models.Todo{}, fmt.Errorf("todo content must not be empty")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t := models.Todo{ID: s.nextTodoID, Content: content, CreatedAt: time.Now(), DueAt: dueAt, Origin: "canvas", CanvasAssignID: &assignmentID, CanvasCourseCode: courseCode, CanvasURL: url, CanvasUpdatedAt: updatedAt}
+	s.nextTodoID++
+	s.todos = append(s.todos, t)
+	if err := s.save(); err != nil {
+		return models.Todo{}, err
+	}
+	return t, nil
+}
+
+func (s *JSONStore) GetTodoByCanvasID(assignmentID int64) (models.Todo, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, t := range s.todos {
+		if t.CanvasAssignID != nil && *t.CanvasAssignID == assignmentID {
+			return t, nil
+		}
+	}
+	return models.Todo{}, fmt.Errorf("canvas assignment %d: %w", assignmentID, ErrNotFound)
+}
+
+func (s *JSONStore) UpdateCanvasTodo(id int, content string, dueAt *time.Time, courseCode, url, updatedAt string) error {
+	if strings.TrimSpace(content) == "" {
+		return fmt.Errorf("todo content must not be empty")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.todos {
+		if s.todos[i].ID == id {
+			s.todos[i].Content = content
+			s.todos[i].DueAt = dueAt
+			s.todos[i].CanvasCourseCode = courseCode
+			s.todos[i].CanvasURL = url
+			s.todos[i].CanvasUpdatedAt = updatedAt
+			return s.save()
+		}
+	}
+	return fmt.Errorf("todo %d: %w", id, ErrNotFound)
+}
+
+func (s *JSONStore) AddCanvasNote(content string, dueAt *time.Time, assignmentID int64, courseCode, url, updatedAt string) (models.Note, error) {
+	if strings.TrimSpace(content) == "" {
+		return models.Note{}, fmt.Errorf("note content must not be empty")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := models.Note{ID: s.nextNoteID, Content: content, CreatedAt: time.Now(), DueAt: dueAt, Origin: "canvas", CanvasAssignID: &assignmentID, CanvasCourseCode: courseCode, CanvasURL: url, CanvasUpdatedAt: updatedAt}
+	s.nextNoteID++
+	s.notes = append(s.notes, n)
+	if err := s.save(); err != nil {
+		return models.Note{}, err
+	}
+	return n, nil
+}
+
+func (s *JSONStore) GetNoteByCanvasID(assignmentID int64) (models.Note, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, n := range s.notes {
+		if n.CanvasAssignID != nil && *n.CanvasAssignID == assignmentID {
+			return n, nil
+		}
+	}
+	return models.Note{}, fmt.Errorf("canvas assignment %d: %w", assignmentID, ErrNotFound)
+}
+
+func (s *JSONStore) UpdateCanvasNote(id int, content string, dueAt *time.Time, courseCode, url, updatedAt string) error {
+	if strings.TrimSpace(content) == "" {
+		return fmt.Errorf("note content must not be empty")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.notes {
+		if s.notes[i].ID == id {
+			s.notes[i].Content = content
+			s.notes[i].DueAt = dueAt
+			s.notes[i].CanvasCourseCode = courseCode
+			s.notes[i].CanvasURL = url
+			s.notes[i].CanvasUpdatedAt = updatedAt
+			return s.save()
+		}
+	}
+	return fmt.Errorf("note %d: %w", id, ErrNotFound)
+}
+
+func (s *JSONStore) GetLastCanvasSync() (time.Time, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.canvasLastSync == "" {
+		return time.Time{}, nil
+	}
+	t, err := time.Parse(time.RFC3339Nano, s.canvasLastSync)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parse last canvas sync %q: %w", s.canvasLastSync, err)
+	}
+	return t, nil
+}
+
+func (s *JSONStore) SetLastCanvasSync(t time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.canvasLastSync = t.UTC().Format(time.RFC3339Nano)
+	return s.save()
 }

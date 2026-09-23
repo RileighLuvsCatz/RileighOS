@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"encoding/json"
@@ -10,6 +10,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"rdb/rileighos/internal/api"
+	"rdb/rileighos/internal/client"
+	"rdb/rileighos/internal/models"
+	"rdb/rileighos/internal/store"
 )
 
 // testBackends mirrors openTestStores in store_test.go: every API test
@@ -21,14 +26,14 @@ var testBackends = []string{"json", "sqlite"}
 func openTestServer(t *testing.T, backend string) string {
 	t.Helper()
 	var (
-		s   Store
+		s   store.FullStore
 		err error
 	)
 	switch backend {
 	case "json":
-		s, err = OpenJSONStore(filepath.Join(t.TempDir(), "rileighos.json"))
+		s, err = store.OpenJSONStore(filepath.Join(t.TempDir(), "rileighos.json"))
 	case "sqlite":
-		s, err = OpenSQLiteStore(filepath.Join(t.TempDir(), "rileighos.db"))
+		s, err = store.OpenSQLiteStore(filepath.Join(t.TempDir(), "rileighos.db"))
 	default:
 		t.Fatalf("unknown backend %q", backend)
 	}
@@ -104,7 +109,7 @@ func TestTodoAPI(t *testing.T) {
 			if status != http.StatusCreated {
 				t.Fatalf("POST: want 201, got %d (%s)", status, data)
 			}
-			created := decodeBody[Todo](t, data)
+			created := decodeBody[models.Todo](t, data)
 			if created.ID <= 0 || created.Content != "buy milk" || created.Done {
 				t.Fatalf("unexpected created todo: %+v", created)
 			}
@@ -114,7 +119,7 @@ func TestTodoAPI(t *testing.T) {
 			if status != http.StatusOK {
 				t.Fatalf("GET one: want 200, got %d (%s)", status, data)
 			}
-			if got := decodeBody[Todo](t, data); got != created {
+			if got := decodeBody[models.Todo](t, data); got != created {
 				t.Fatalf("GET one: want %+v, got %+v", created, got)
 			}
 
@@ -123,7 +128,7 @@ func TestTodoAPI(t *testing.T) {
 			if status != http.StatusOK {
 				t.Fatalf("GET list: want 200, got %d (%s)", status, data)
 			}
-			if got := decodeBody[[]Todo](t, data); len(got) != 1 || got[0] != created {
+			if got := decodeBody[[]models.Todo](t, data); len(got) != 1 || got[0] != created {
 				t.Fatalf("GET list: want [%+v], got %+v", created, got)
 			}
 
@@ -132,14 +137,14 @@ func TestTodoAPI(t *testing.T) {
 			if status != http.StatusOK {
 				t.Fatalf("PATCH done: want 200, got %d (%s)", status, data)
 			}
-			if got := decodeBody[Todo](t, data); !got.Done {
+			if got := decodeBody[models.Todo](t, data); !got.Done {
 				t.Fatalf("PATCH done: want done=true, got %+v", got)
 			}
 			status, data = doRaw(t, http.MethodPatch, fmt.Sprintf("%s/todos/%d", base, created.ID), `{"done":false}`)
 			if status != http.StatusOK {
 				t.Fatalf("PATCH undone: want 200, got %d (%s)", status, data)
 			}
-			if got := decodeBody[Todo](t, data); got.Done {
+			if got := decodeBody[models.Todo](t, data); got.Done {
 				t.Fatalf("PATCH undone: want done=false, got %+v", got)
 			}
 
@@ -174,7 +179,7 @@ func TestNoteAPI(t *testing.T) {
 			if status != http.StatusCreated {
 				t.Fatalf("POST: want 201, got %d (%s)", status, data)
 			}
-			created := decodeBody[Note](t, data)
+			created := decodeBody[models.Note](t, data)
 			if created.ID <= 0 || created.Content != "idea: build a thing" {
 				t.Fatalf("unexpected created note: %+v", created)
 			}
@@ -183,7 +188,7 @@ func TestNoteAPI(t *testing.T) {
 			if status != http.StatusOK {
 				t.Fatalf("GET one: want 200, got %d (%s)", status, data)
 			}
-			if got := decodeBody[Note](t, data); got != created {
+			if got := decodeBody[models.Note](t, data); got != created {
 				t.Fatalf("GET one: want %+v, got %+v", created, got)
 			}
 
@@ -191,7 +196,7 @@ func TestNoteAPI(t *testing.T) {
 			if status != http.StatusOK {
 				t.Fatalf("GET list: want 200, got %d (%s)", status, data)
 			}
-			if got := decodeBody[[]Note](t, data); len(got) != 1 || got[0] != created {
+			if got := decodeBody[[]models.Note](t, data); len(got) != 1 || got[0] != created {
 				t.Fatalf("GET list: want [%+v], got %+v", created, got)
 			}
 
@@ -241,7 +246,7 @@ func TestAPIBadRequests(t *testing.T) {
 			}
 			// Every error must use the shared shape.
 			if status >= 400 {
-				se := decodeBody[serverError](t, data)
+				se := decodeBody[api.ErrorBody](t, data)
 				if strings.TrimSpace(se.Error) == "" {
 					t.Fatalf("%s %s: want non-empty error message, got %s", tc.method, tc.url, data)
 				}
@@ -255,7 +260,7 @@ func TestAPIBadRequests(t *testing.T) {
 func TestClientRoundTrip(t *testing.T) {
 	for _, backend := range testBackends {
 		t.Run(backend, func(t *testing.T) {
-			c := NewClient(openTestServer(t, backend))
+			c := client.NewClient(openTestServer(t, backend))
 			defer c.Close()
 
 			a, err := c.AddTodo("buy milk")
@@ -288,8 +293,8 @@ func TestClientRoundTrip(t *testing.T) {
 			if err := c.DeleteTodo(b.ID); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := c.GetTodo(b.ID); !errors.Is(err, ErrNotFound) {
-				t.Fatalf("want ErrNotFound, got %v", err)
+			if _, err := c.GetTodo(b.ID); !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("want store.ErrNotFound, got %v", err)
 			}
 
 			n, err := c.AddNote("idea: build a thing")
@@ -302,8 +307,8 @@ func TestClientRoundTrip(t *testing.T) {
 			if err := c.DeleteNote(n.ID); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := c.GetNote(n.ID); !errors.Is(err, ErrNotFound) {
-				t.Fatalf("want ErrNotFound, got %v", err)
+			if _, err := c.GetNote(n.ID); !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("want store.ErrNotFound, got %v", err)
 			}
 			if _, err := c.AddTodo("   "); err == nil {
 				t.Fatal("want error for blank todo over HTTP")
@@ -320,7 +325,7 @@ func TestClientServerDown(t *testing.T) {
 	url := ts.URL
 	ts.Close() // nothing listening anymore
 
-	c := NewClient(url)
+	c := client.NewClient(url)
 	defer c.Close()
 	_, err := c.GetTodos()
 	if err == nil {
@@ -331,9 +336,9 @@ func TestClientServerDown(t *testing.T) {
 	}
 }
 
-func mustOpenSQLite(t *testing.T) Store {
+func mustOpenSQLite(t *testing.T) store.FullStore {
 	t.Helper()
-	s, err := OpenSQLiteStore(filepath.Join(t.TempDir(), "down.db"))
+	s, err := store.OpenSQLiteStore(filepath.Join(t.TempDir(), "down.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -351,7 +356,7 @@ func TestCheckoffAPI(t *testing.T) {
 			if status != http.StatusCreated {
 				t.Fatalf("POST: want 201, got %d (%s)", status, data)
 			}
-			created := decodeBody[Checkoff](t, data)
+			created := decodeBody[models.Checkoff](t, data)
 			if created.ID <= 0 || created.Name != "exercise" {
 				t.Fatalf("unexpected created checkoff: %+v", created)
 			}
@@ -362,7 +367,7 @@ func TestCheckoffAPI(t *testing.T) {
 			if status != http.StatusOK {
 				t.Fatalf("GET one: want 200, got %d (%s)", status, data)
 			}
-			view := decodeBody[CheckoffView](t, data)
+			view := decodeBody[models.CheckoffView](t, data)
 			if view.Streak != 0 || view.CheckedToday || len(view.Days) != 0 {
 				t.Fatalf("want fresh zero view, got %+v", view)
 			}
@@ -380,7 +385,7 @@ func TestCheckoffAPI(t *testing.T) {
 				t.Fatalf("POST re-check: want 200, got %d", status)
 			}
 			status, data = doRaw(t, http.MethodGet, url, "")
-			view = decodeBody[CheckoffView](t, data)
+			view = decodeBody[models.CheckoffView](t, data)
 			if status != http.StatusOK || len(view.Days) != 2 {
 				t.Fatalf("want 2 days after idempotent checks, got %+v (%s)", view, data)
 			}
@@ -390,7 +395,7 @@ func TestCheckoffAPI(t *testing.T) {
 				t.Fatalf("DELETE check: want 200, got %d", status)
 			}
 			status, data = doRaw(t, http.MethodGet, url, "")
-			if view = decodeBody[CheckoffView](t, data); len(view.Days) != 1 {
+			if view = decodeBody[models.CheckoffView](t, data); len(view.Days) != 1 {
 				t.Fatalf("want 1 day after uncheck, got %+v", view)
 			}
 
@@ -399,7 +404,7 @@ func TestCheckoffAPI(t *testing.T) {
 			if status != http.StatusOK {
 				t.Fatalf("GET list: want 200, got %d (%s)", status, data)
 			}
-			if got := decodeBody[[]Checkoff](t, data); len(got) != 1 {
+			if got := decodeBody[[]models.Checkoff](t, data); len(got) != 1 {
 				t.Fatalf("want 1 checkoff, got %+v", got)
 			}
 			if status, _ := doRaw(t, http.MethodDelete, url, ""); status != http.StatusNoContent {
@@ -424,7 +429,7 @@ func TestTodayAPI(t *testing.T) {
 			if status != http.StatusCreated {
 				t.Fatalf("POST todo: want 201, got %d (%s)", status, data)
 			}
-			doneID := decodeBody[Todo](t, data).ID
+			doneID := decodeBody[models.Todo](t, data).ID
 			if status, _ := doRaw(t, http.MethodPatch, fmt.Sprintf("%s/todos/%d", base, doneID), `{"done":true}`); status != http.StatusOK {
 				t.Fatalf("PATCH done: want 200, got %d", status)
 			}
@@ -432,7 +437,7 @@ func TestTodayAPI(t *testing.T) {
 			if status != http.StatusCreated {
 				t.Fatalf("POST checkoff: want 201, got %d (%s)", status, data)
 			}
-			habitID := decodeBody[Checkoff](t, data).ID
+			habitID := decodeBody[models.Checkoff](t, data).ID
 			// Empty body means today — the CLI's check path.
 			if status, _ := doRaw(t, http.MethodPost, fmt.Sprintf("%s/checkoffs/%d/check", base, habitID), ""); status != http.StatusOK {
 				t.Fatalf("POST check today: want 200, got %d", status)
@@ -442,9 +447,9 @@ func TestTodayAPI(t *testing.T) {
 			if status != http.StatusOK {
 				t.Fatalf("GET /today: want 200, got %d (%s)", status, data)
 			}
-			view := decodeBody[TodayView](t, data)
-			if view.Date != Today() {
-				t.Fatalf("want date %s, got %s", Today(), view.Date)
+			view := decodeBody[models.TodayView](t, data)
+			if view.Date != store.Today() {
+				t.Fatalf("want date %s, got %s", store.Today(), view.Date)
 			}
 			if len(view.OpenTodos) != 1 || view.OpenTodos[0].Content != "open task" {
 				t.Fatalf("want only the open todo, got %+v", view.OpenTodos)
@@ -496,7 +501,7 @@ func TestCheckoffBadRequests(t *testing.T) {
 				t.Fatalf("%s %s: want %d, got %d (%s)", tc.method, tc.url, tc.wantStatus, status, data)
 			}
 			if status >= 400 {
-				se := decodeBody[serverError](t, data)
+				se := decodeBody[api.ErrorBody](t, data)
 				if strings.TrimSpace(se.Error) == "" {
 					t.Fatalf("%s %s: want non-empty error message, got %s", tc.method, tc.url, data)
 				}
@@ -510,7 +515,7 @@ func TestCheckoffBadRequests(t *testing.T) {
 func TestClientCheckoffRoundTrip(t *testing.T) {
 	for _, backend := range testBackends {
 		t.Run(backend, func(t *testing.T) {
-			c := NewClient(openTestServer(t, backend))
+			c := client.NewClient(openTestServer(t, backend))
 			defer c.Close()
 
 			habit, err := c.AddCheckoff("exercise")
@@ -530,21 +535,21 @@ func TestClientCheckoffRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(days) != 2 || days[len(days)-1] != Today() {
+			if len(days) != 2 || days[len(days)-1] != store.Today() {
 				t.Fatalf("want 2 days ending today, got %v", days)
 			}
 			if err := c.UncheckDay(habit.ID, "2026-09-12"); err != nil {
 				t.Fatal(err)
 			}
-			if err := c.CheckDay(999, "2026-09-14"); !errors.Is(err, ErrNotFound) {
-				t.Fatalf("want ErrNotFound, got %v", err)
+			if err := c.CheckDay(999, "2026-09-14"); !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("want store.ErrNotFound, got %v", err)
 			}
 
 			view, err := c.GetToday()
 			if err != nil {
 				t.Fatal(err)
 			}
-			if view.Date != Today() || len(view.Checkoffs) != 1 {
+			if view.Date != store.Today() || len(view.Checkoffs) != 1 {
 				t.Fatalf("unexpected today view: %+v", view)
 			}
 			got := view.Checkoffs[0]
@@ -555,8 +560,8 @@ func TestClientCheckoffRoundTrip(t *testing.T) {
 			if err := c.DeleteCheckoff(habit.ID); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := c.GetCheckoff(habit.ID); !errors.Is(err, ErrNotFound) {
-				t.Fatalf("want ErrNotFound, got %v", err)
+			if _, err := c.GetCheckoff(habit.ID); !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("want store.ErrNotFound, got %v", err)
 			}
 		})
 	}

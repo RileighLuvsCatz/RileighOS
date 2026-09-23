@@ -1,4 +1,4 @@
-package main
+package store
 
 import (
 	"errors"
@@ -8,10 +8,10 @@ import (
 
 // openTestStores returns one factory per backend so every test below
 // runs against both JSON and SQLite through the Store interface only.
-func openTestStores(t *testing.T) map[string]func(t *testing.T) Store {
+func openTestStores(t *testing.T) map[string]func(t *testing.T) FullStore {
 	t.Helper()
-	return map[string]func(t *testing.T) Store{
-		"json": func(t *testing.T) Store {
+	return map[string]func(t *testing.T) FullStore{
+		"json": func(t *testing.T) FullStore {
 			t.Helper()
 			s, err := OpenJSONStore(filepath.Join(t.TempDir(), "rileighos.json"))
 			if err != nil {
@@ -20,7 +20,7 @@ func openTestStores(t *testing.T) map[string]func(t *testing.T) Store {
 			t.Cleanup(func() { s.Close() })
 			return s
 		},
-		"sqlite": func(t *testing.T) Store {
+		"sqlite": func(t *testing.T) FullStore {
 			t.Helper()
 			s, err := OpenSQLiteStore(filepath.Join(t.TempDir(), "rileighos.db"))
 			if err != nil {
