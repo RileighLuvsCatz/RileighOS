@@ -33,7 +33,8 @@ serve flags:
   --backend sqlite|json   storage backend (default "sqlite")
   --db PATH               sqlite file (default "rileighos.db")
   --json PATH             json file for --backend json (default "rileighos.json")
-  --addr HOST:PORT        listen address (default "localhost:8080")
+  --addr HOST:PORT        listen address (default ":8080", all interfaces;
+                          use "localhost:8080" to listen locally only)
 
 global flags:
   --server URL            server to talk to (default "http://localhost:8080",
@@ -138,7 +139,10 @@ func runServe(args []string) error {
 	backend := "sqlite"
 	dbPath := envOr("RILEIGHOS_DB_PATH", "rileighos.db")
 	jsonPath := envOr("RILEIGHOS_JSON_PATH", "rileighos.json")
-	addr := envOr("RILEIGHOS_ADDR", "localhost:8080")
+	// Default to all interfaces so the server is reachable over Tailscale
+	// when it runs on the Pi. Pass --addr localhost:8080 (or set
+	// RILEIGHOS_ADDR) to listen locally only during development.
+	addr := envOr("RILEIGHOS_ADDR", ":8080")
 
 	for len(args) > 0 && strings.HasPrefix(args[0], "-") {
 		switch args[0] {
@@ -190,7 +194,13 @@ func runServe(args []string) error {
 		Handler:           NewServer(store).Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
-	fmt.Printf("rileighos server listening on http://%s (backend %s)\n", addr, backend)
+	// A bare ":8080" means all interfaces; render it as localhost so the
+	// startup line stays a clickable URL during local development.
+	displayAddr := addr
+	if strings.HasPrefix(displayAddr, ":") {
+		displayAddr = "localhost" + displayAddr
+	}
+	fmt.Printf("rileighos server listening on http://%s (backend %s)\n", displayAddr, backend)
 	return srv.ListenAndServe()
 }
 
