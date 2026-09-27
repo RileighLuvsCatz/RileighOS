@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"rdb/rileighos/internal/canvas"
 	"rdb/rileighos/internal/client"
 	"rdb/rileighos/internal/models"
 	"rdb/rileighos/internal/server"
@@ -45,6 +46,7 @@ serve flags:
 global flags:
   --server URL            server to talk to (default "http://localhost:8080",
                           env RILEIGHOS_SERVER_URL)
+  --no-sync               skip the on-open Canvas auto-sync for this command
 
 todo commands:
   rileighos todo add <text>            add a todo
@@ -67,7 +69,7 @@ checkoff commands:
   rileighos checkoff uncheck <id> [YYYY-MM-DD]
   rileighos checkoff delete <id>
 
-  rileighos today                      open todos + check-off streaks
+  rileighos today                      check-off status + todos due today
 
 canvas commands (needs RILEIGHOS_CANVAS_TOKEN on the server):
   rileighos canvas sync                import published assignments
@@ -89,6 +91,7 @@ func run(args []string) error {
 	// The CLI is a pure HTTP client in Phase 2: the only thing it needs
 	// to know is where the server lives.
 	serverURL := envOr("RILEIGHOS_SERVER_URL", "http://localhost:8080")
+	noSync := false
 
 	// Parse global flags (everything before <serve|todo|note>).
 	for len(args) > 0 && strings.HasPrefix(args[0], "-") {
@@ -99,6 +102,9 @@ func run(args []string) error {
 			}
 			serverURL = args[1]
 			args = args[2:]
+		case "--no-sync":
+			noSync = true
+			args = args[1:]
 		case "-h", "--help", "help":
 			fmt.Print(usage)
 			return nil
@@ -117,6 +123,13 @@ func run(args []string) error {
 	}
 
 	resource, args := strings.ToLower(args[0]), args[1:]
+	if resource != "serve" && !noSync {
+		// Every frontend open syncs Canvas when stale: the server owns
+		// the schedule via last_sync_at, so concurrent frontends (CLI,
+		// TUI, ticker) share one clock. Best-effort — a failed sync
+		// warns and the requested command still runs.
+		maybeAutoSync(serverURL)
+	}
 	switch resource {
 	case "serve":
 		return runServe(args)
@@ -219,7 +232,48 @@ func runServe(args []string) error {
 		displayAddr = "localhost" + displayAddr
 	}
 	fmt.Printf("rileighos server listening on http://%s (backend %s)\n", displayAddr, backend)
+	startCanvasTicker(store)
 	return srv.ListenAndServe()
+}
+
+// startCanvasTicker runs periodic Canvas imports in the background when a
+// token is configured: one immediate sync (non-blocking, so startup never
+// waits on the network) plus a ticker. Interval comes from
+// RILEIGHOS_CANVAS_SYNC_INTERVAL (default 30m, "0" disables); without a
+// token it stays silent — Canvas is opt-in.
+func startCanvasTicker(s store.FullStore) {
+	cv, err := canvas.NewCanvasClientFromEnv()
+	if err != nil {
+		return
+	}
+	interval, enabled, err := canvas.ParseInterval(os.Getenv("RILEIGHOS_CANVAS_SYNC_INTERVAL"), 30*time.Minute)
+	if err != nil {
+		fmt.Printf("canvas auto-sync disabled: bad RILEIGHOS_CANVAS_SYNC_INTERVAL (%v)\n", err)
+		return
+	}
+	if !enabled {
+		return
+	}
+	fmt.Printf("canvas auto-sync every %s\n", canvas.FormatInterval(interval))
+	go func() {
+		syncOnce := func() {
+			res, err := canvas.RunCanvasSync(s, cv, models.SyncModeAuto, nil)
+			if err != nil {
+				fmt.Printf("canvas auto-sync: %v\n", err)
+				return
+			}
+			if res.Imported+res.Updated+res.Completed+res.Reopened > 0 {
+				fmt.Printf("canvas auto-sync: imported %d, updated %d, completed %d, reopened %d\n",
+					res.Imported, res.Updated, res.Completed, res.Reopened)
+			}
+		}
+		syncOnce()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for range ticker.C {
+			syncOnce()
+		}
+	}()
 }
 
 // openStore is the single place where the storage backend is chosen.
@@ -414,6 +468,48 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
+// staleAfter is how long an on-open auto-sync waits since the last sync.
+// Overridable via RILEIGHOS_CANVAS_STALE_AFTER ("15m"); unparseable falls
+// back to the default so a typo never bricks the CLI.
+func staleAfter() time.Duration {
+	if raw := os.Getenv("RILEIGHOS_CANVAS_STALE_AFTER"); raw != "" {
+		if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+			return d
+		}
+		fmt.Fprintf(os.Stderr, "warning: ignoring bad RILEIGHOS_CANVAS_STALE_AFTER %q (want e.g. \"15m\")\n", raw)
+	}
+	return 15 * time.Minute
+}
+
+// maybeAutoSync fires one auto-mode import when the server's last sync is
+// stale. Silent when Canvas is unconfigured or fresh; warns (never fails)
+// when the sync itself errors, so offline use keeps working.
+func maybeAutoSync(serverURL string) {
+	client := client.NewClient(serverURL)
+	defer client.Close()
+	status, err := client.GetCanvasStatus()
+	if err != nil || !status.Configured {
+		return
+	}
+	var last time.Time
+	if status.LastSyncAt != nil {
+		last = *status.LastSyncAt
+	}
+	// canvas.SyncStale lives with the sync engine; the threshold lives here.
+	if !canvas.SyncStale(last, time.Now(), staleAfter()) {
+		return
+	}
+	res, err := client.SyncCanvas(models.SyncModeAuto, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: canvas auto-sync failed: %v\n", err)
+		return
+	}
+	if res.Imported+res.Updated+res.Completed+res.Reopened > 0 {
+		fmt.Fprintf(os.Stderr, "auto-sync: imported %d, updated %d, completed %d, reopened %d\n",
+			res.Imported, res.Updated, res.Completed, res.Reopened)
+	}
+}
+
 func runCheckoff(s store.Store, args []string) error {
 	if len(args) == 0 {
 		return errors.New("checkoff needs a command: add, list, show, check, uncheck, delete")
@@ -547,14 +643,6 @@ func runToday(s store.Store) error {
 		return err
 	}
 	fmt.Printf("today %s\n", view.Date)
-	fmt.Println("open todos:")
-	if len(view.OpenTodos) == 0 {
-		fmt.Println("  (none)")
-	} else {
-		for _, t := range view.OpenTodos {
-			fmt.Printf("  [ ] %d %s\n", t.ID, t.Content)
-		}
-	}
 	fmt.Println("check-offs:")
 	if len(view.Checkoffs) == 0 {
 		fmt.Println("  (none)")
@@ -565,6 +653,14 @@ func runToday(s store.Store) error {
 				box = "x"
 			}
 			fmt.Printf("  [%s] %d %s (streak %d)\n", box, c.ID, c.Name, c.Streak)
+		}
+	}
+	fmt.Println("due today:")
+	if len(view.DueTodos) == 0 {
+		fmt.Println("  (none)")
+	} else {
+		for _, t := range view.DueTodos {
+			fmt.Printf("  [ ] %d %s\n", t.ID, t.Content)
 		}
 	}
 	return nil
@@ -628,12 +724,16 @@ func runCanvasSync(s client.CanvasSyncer) error {
 			decisions[c.CourseID] = true
 		}
 	}
-	res, err := s.SyncCanvas(decisions)
+	res, err := s.SyncCanvas(models.SyncModeManual, decisions)
 	if err != nil {
 		return err
 	}
 	fmt.Printf("imported %d, updated %d, completed %d, reopened %d, skipped %d\n",
 		res.Imported, res.Updated, res.Completed, res.Reopened, res.Skipped)
+	if res.DetachedTodos+res.DetachedNotes > 0 {
+		fmt.Printf("detached %d todos, %d notes to local (excluded courses keep nothing importing)\n",
+			res.DetachedTodos, res.DetachedNotes)
+	}
 	if len(res.PendingCourses) > 0 {
 		fmt.Println("still pending (sync again to decide):")
 		for _, c := range res.PendingCourses {
@@ -694,7 +794,8 @@ func runCanvasResolve(s client.CanvasSyncer, arg string, excluded bool) error {
 	if err != nil {
 		return err
 	}
-	if _, err := s.ResolveCanvasCourse(c.CourseID, excluded); err != nil {
+	res, err := s.ResolveCanvasCourse(c.CourseID, excluded)
+	if err != nil {
 		return err
 	}
 	verb := "included"
@@ -702,5 +803,8 @@ func runCanvasResolve(s client.CanvasSyncer, arg string, excluded bool) error {
 		verb = "excluded"
 	}
 	fmt.Printf("course %s (%s) %s\n", c.Code, c.Name, verb)
+	if res.DetachedTodos+res.DetachedNotes > 0 {
+		fmt.Printf("detached %d todos, %d notes to local\n", res.DetachedTodos, res.DetachedNotes)
+	}
 	return nil
 }

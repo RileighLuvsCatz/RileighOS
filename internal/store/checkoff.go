@@ -24,8 +24,7 @@ func ValidDay(day string) bool {
 	return t.Format(dayLayout) == day
 }
 
-// prevDay steps one calendar day back. It is only called with values that
-// passed ValidDay on the way into the store, so a parse failure can only
+// prevDay steps one calendar day back. It is only called with values that// passed ValidDay on the way into the store, so a parse failure can only
 // mean corrupted data — and the safe answer then is to end the streak.
 func prevDay(day string) (string, bool) {
 	t, err := time.Parse(dayLayout, day)
@@ -65,4 +64,11 @@ func CurrentStreak(days []string, today string) int {
 		cursor = prev
 	}
 	return streak
+}
+
+// dueDay renders a timestamp's calendar date in the server-local zone,
+// comparable against Today(). Canvas due_at values carry their own offset;
+// converting to local keeps "due today" meaning the user's today.
+func dueDay(t *time.Time) string {
+	return t.In(time.Local).Format(dayLayout)
 }

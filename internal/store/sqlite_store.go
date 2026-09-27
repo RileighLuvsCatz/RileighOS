@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -563,21 +564,29 @@ func (s *SQLiteStore) GetToday() (models.TodayView, error) {
 		return models.TodayView{}, fmt.Errorf("today todos: %w", err)
 	}
 	defer todoRows.Close()
-	open := []models.Todo{}
+	due := []models.Todo{}
 	for todoRows.Next() {
 		var ts todoScan
 		if err := todoRows.Scan(ts.targets()...); err != nil {
 			return models.TodayView{}, fmt.Errorf("scan today todo: %w", err)
 		}
 		ts.finish()
-		if ts.todo.Done {
+		// Today shows open todos due today or overdue: undated and
+		// future-dated items live in `todo list`, not here.
+		if ts.todo.Done || ts.todo.DueAt == nil || dueDay(ts.todo.DueAt) > today {
 			continue
 		}
-		open = append(open, ts.todo)
+		due = append(due, ts.todo)
 	}
 	if err := todoRows.Err(); err != nil {
 		return models.TodayView{}, fmt.Errorf("today todos: %w", err)
 	}
+	sort.Slice(due, func(i, j int) bool {
+		if !due[i].DueAt.Equal(*due[j].DueAt) {
+			return due[i].DueAt.Before(*due[j].DueAt)
+		}
+		return due[i].ID < due[j].ID
+	})
 
 	coRows, err := s.db.Query(`SELECT id, name, created_at FROM checkoffs ORDER BY id`)
 	if err != nil {
@@ -631,7 +640,7 @@ func (s *SQLiteStore) GetToday() (models.TodayView, error) {
 			CheckedToday: checkedToday,
 		})
 	}
-	return models.TodayView{Date: today, OpenTodos: open, Checkoffs: views}, nil
+	return models.TodayView{Date: today, DueTodos: due, Checkoffs: views}, nil
 }
 
 // --- Canvas sync support ---
@@ -873,4 +882,43 @@ func (s *SQLiteStore) SetLastCanvasSync(t time.Time) error {
 		return fmt.Errorf("write last canvas sync: %w", err)
 	}
 	return nil
+}
+
+// DetachCanvasCourse converts one course's imported todos/notes to plain
+// local items: origin, external ID, URL, and upstream timestamp are
+// cleared, while content (including the "[CODE] " prefix) and done state
+// are left exactly as the user left them.
+func (s *SQLiteStore) DetachCanvasCourse(courseID int64) (int, int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var code string
+	err := s.db.QueryRow(`SELECT code FROM canvas_courses WHERE course_id = ?`, courseID).Scan(&code)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, 0, fmt.Errorf("canvas course %d: %w", courseID, ErrNotFound)
+		}
+		return 0, 0, fmt.Errorf("read canvas course %d: %w", courseID, err)
+	}
+	detach := func(table string) (int, error) {
+		res, err := s.db.Exec(
+			`UPDATE `+table+` SET origin = '', canvas_assignment_id = NULL, canvas_url = '', canvas_updated_at = '' WHERE origin = 'canvas' AND canvas_course_code = ?`, code,
+		)
+		if err != nil {
+			return 0, fmt.Errorf("detach %s for course %d: %w", table, courseID, err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return 0, fmt.Errorf("detach %s for course %d: %w", table, courseID, err)
+		}
+		return int(n), nil
+	}
+	todos, err := detach("todos")
+	if err != nil {
+		return 0, 0, err
+	}
+	notes, err := detach("notes")
+	if err != nil {
+		return 0, 0, err
+	}
+	return todos, notes, nil
 }

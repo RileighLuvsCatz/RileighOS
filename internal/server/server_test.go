@@ -420,6 +420,8 @@ func TestCheckoffAPI(t *testing.T) {
 func TestTodayAPI(t *testing.T) {
 	for _, backend := range testBackends {
 		t.Run(backend, func(t *testing.T) {
+			fake := &apiTestFake{token: canvasTestSecret}
+			withCanvasEnv(t, fake.serve(t))
 			base := openTestServer(t, backend)
 
 			if status, data := doRaw(t, http.MethodPost, base+"/todos", `{"content":"open task"}`); status != http.StatusCreated {
@@ -442,6 +444,11 @@ func TestTodayAPI(t *testing.T) {
 			if status, _ := doRaw(t, http.MethodPost, fmt.Sprintf("%s/checkoffs/%d/check", base, habitID), ""); status != http.StatusOK {
 				t.Fatalf("POST check today: want 200, got %d", status)
 			}
+			// Canvas sync imports an overdue worksheet; the undated local
+			// "open task" must NOT appear in today.
+			if status, _ := doRaw(t, http.MethodPost, base+"/canvas/sync", `{"decisions":{"1":false,"2":false}}`); status != http.StatusOK {
+				t.Fatalf("POST sync: want 200, got %d", status)
+			}
 
 			status, data = doRaw(t, http.MethodGet, base+"/today", "")
 			if status != http.StatusOK {
@@ -451,8 +458,8 @@ func TestTodayAPI(t *testing.T) {
 			if view.Date != store.Today() {
 				t.Fatalf("want date %s, got %s", store.Today(), view.Date)
 			}
-			if len(view.OpenTodos) != 1 || view.OpenTodos[0].Content != "open task" {
-				t.Fatalf("want only the open todo, got %+v", view.OpenTodos)
+			if len(view.DueTodos) != 1 || view.DueTodos[0].Content != "[ART 150] Overdue worksheet" {
+				t.Fatalf("want only the overdue canvas todo, got %+v", view.DueTodos)
 			}
 			if len(view.Checkoffs) != 1 {
 				t.Fatalf("want 1 checkoff, got %+v", view.Checkoffs)

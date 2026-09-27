@@ -59,11 +59,12 @@ type CheckoffView struct {
 	CheckedToday bool     `json:"checked_today"`
 }
 
-// TodayView is the answer to "what does my day look like": open todos
-// plus every check-off with its streak, computed as of Date.
+// TodayView is the answer to "what does my day look like": check-offs with
+// their streaks plus open todos due today or overdue (undated and
+// future-dated todos live in `todo list`, not here), computed as of Date.
 type TodayView struct {
 	Date      string         `json:"date"`
-	OpenTodos []Todo         `json:"open_todos"`
+	DueTodos  []Todo         `json:"due_todos"`
 	Checkoffs []CheckoffView `json:"checkoffs"`
 }
 
@@ -101,6 +102,15 @@ type CanvasItem struct {
 // Absent entries leave the course as-is (still pending).
 type SyncDecisions map[int64]bool
 
+// SyncMode selects import strictness. Manual skips unconfirmed courses;
+// auto imports them but keeps them pending for later confirmation.
+type SyncMode string
+
+const (
+	SyncModeManual SyncMode = "manual"
+	SyncModeAuto   SyncMode = "auto"
+)
+
 // SyncResult summarizes one Canvas sync for CLI display and API responses.
 type SyncResult struct {
 	Imported       int            `json:"imported"`
@@ -108,5 +118,24 @@ type SyncResult struct {
 	Completed      int            `json:"completed"`
 	Reopened       int            `json:"reopened"`
 	Skipped        int            `json:"skipped"`
+	DetachedTodos  int            `json:"detached_todos"`
+	DetachedNotes  int            `json:"detached_notes"`
 	PendingCourses []CanvasCourse `json:"pending_courses"`
+}
+
+// CanvasStatus is the GET /canvas/status probe: whether the server can talk
+// to Canvas at all, and when it last did. The CLI uses it to decide if an
+// on-open auto-sync is due; no import happens here.
+type CanvasStatus struct {
+	Configured bool       `json:"configured"`
+	LastSyncAt *time.Time `json:"last_sync_at,omitempty"`
+}
+
+// CourseResolveResult is the PATCH /canvas/courses/{id} response: the
+// updated course plus how many imported items were converted to local when
+// a course was excluded (zero when included).
+type CourseResolveResult struct {
+	Course        CanvasCourse `json:"course"`
+	DetachedTodos int          `json:"detached_todos"`
+	DetachedNotes int          `json:"detached_notes"`
 }

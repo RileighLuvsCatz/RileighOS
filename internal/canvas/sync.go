@@ -10,16 +10,21 @@ import (
 )
 
 // RunCanvasSync is the single import path behind every trigger (manual
-// command, on-open, ticker — Build B adds the latter two). It is idempotent:
-// re-running with no upstream changes imports nothing, and it never deletes
-// user data — assignments that vanish upstream are simply left alone.
+// command, on-open, ticker). It is idempotent: re-running with no upstream
+// changes imports nothing, and it never deletes user data — assignments
+// that vanish upstream are simply left alone.
+//
+// In manual mode unconfirmed courses are skipped and reported pending; in
+// auto mode they import anyway but stay pending for later confirmation.
+// Excluding a course (via decisions) additionally detaches its already
+// imported items to plain local todos/notes.
 //
 // Flow: refresh the course list (new courses arrive pending_confirm),
-// apply decisions (course ID -> excluded), then import published
-// assignments for included, confirmed courses. Submitted-but-never-imported
-// assignments are skipped (done history, not work); submitted state on an
-// already-imported todo flips Done, and unsubmit reopens it (mirror).
-func RunCanvasSync(s store.FullStore, cv *CanvasClient, decisions models.SyncDecisions) (models.SyncResult, error) {
+// apply decisions, then import published assignments for included courses.
+// Submitted-but-never-imported assignments are skipped (done history, not
+// work); submitted state on an already-imported todo flips Done, and
+// unsubmit reopens it (mirror).
+func RunCanvasSync(s store.FullStore, cv *CanvasClient, mode models.SyncMode, decisions models.SyncDecisions) (models.SyncResult, error) {
 	var res models.SyncResult
 
 	courses, err := cv.GetCourses()
@@ -38,6 +43,14 @@ func RunCanvasSync(s store.FullStore, cv *CanvasClient, decisions models.SyncDec
 			if err := s.ResolveCanvasCourse(info.ID, excluded); err != nil {
 				return res, err
 			}
+			if excluded {
+				todos, notes, err := s.DetachCanvasCourse(info.ID)
+				if err != nil {
+					return res, err
+				}
+				res.DetachedTodos += todos
+				res.DetachedNotes += notes
+			}
 		}
 	}
 
@@ -52,7 +65,11 @@ func RunCanvasSync(s store.FullStore, cv *CanvasClient, decisions models.SyncDec
 	for _, course := range tracked {
 		if course.PendingConfirm {
 			res.PendingCourses = append(res.PendingCourses, course)
-			continue
+			if mode == models.SyncModeManual {
+				continue
+			}
+			// Auto mode imports unconfirmed courses but leaves them
+			// pending, so the next manual sync still asks.
 		}
 		if course.Excluded {
 			continue

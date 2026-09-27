@@ -211,3 +211,51 @@ func TestCanvasPersistsAcrossReopen(t *testing.T) {
 		})
 	}
 }
+
+func TestDetachCanvasCourse(t *testing.T) {
+	for backend, open := range openTestStores(t) {
+		t.Run(backend, func(t *testing.T) {
+			s := open(t)
+			if _, err := s.UpsertCanvasCourse(models.CanvasCourse{CourseID: 1, Code: "ART 150", Name: "Drawing"}); err != nil {
+				t.Fatal(err)
+			}
+			due := canvasDue("2026-10-01T23:59:00-05:00")
+			todo, err := s.AddCanvasTodo("[ART 150] Essay", due, 101, "ART 150", "http://x/101", "v1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.MarkTodoDone(todo.ID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.AddCanvasNote("[ART 150] Reading", nil, 102, "ART 150", "http://x/102", "v1"); err != nil {
+				t.Fatal(err)
+			}
+
+			todos, notes, err := s.DetachCanvasCourse(1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if todos != 1 || notes != 1 {
+				t.Fatalf("want 1+1 detached, got %d+%d", todos, notes)
+			}
+			got, err := s.GetTodo(todo.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Origin != "" || got.CanvasAssignID != nil || got.Content != "[ART 150] Essay" || !got.Done {
+				t.Fatalf("detached todo must keep content+done, lose provenance: %+v", got)
+			}
+			if _, err := s.GetTodoByCanvasID(101); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("detached lookup must miss: %v", err)
+			}
+
+			// Detaching again converts nothing; unknown courses 404.
+			if todos, notes, err := s.DetachCanvasCourse(1); err != nil || todos+notes != 0 {
+				t.Fatalf("re-detach must be empty: %d+%d, err %v", todos, notes, err)
+			}
+			if _, _, err := s.DetachCanvasCourse(999); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("want ErrNotFound, got %v", err)
+			}
+		})
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // openTestStores returns one factory per backend so every test below
@@ -244,5 +245,77 @@ func TestSQLitePersistsAcrossReopen(t *testing.T) {
 	}
 	if got.Content != "persist me" {
 		t.Fatalf("todo did not survive reopen: %+v", got)
+	}
+}
+
+func canvasDueAt(s string) *time.Time {
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		panic(err)
+	}
+	return &t
+}
+
+// TestTodayDueFilter pins the today contract: open todos due today or
+// overdue, sorted by due instant (ties by ID); undated, future-dated, and
+// done todos are excluded.
+func TestTodayDueFilter(t *testing.T) {
+	for backend, open := range openTestStores(t) {
+		t.Run(backend, func(t *testing.T) {
+			s := open(t)
+			today := Today()
+			yesterday, _ := prevDay(today)
+			tomorrow := time.Now().Add(30 * time.Hour).Format(dayLayout)
+
+			mk := func(day string) *time.Time {
+				if day == "" {
+					return nil
+				}
+				return canvasDueAt(day + "T12:00:00Z")
+			}
+			if _, err := s.AddTodo("undated"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.AddCanvasTodo("future", mk(tomorrow), 901, "C", "", "v1"); err != nil {
+				t.Fatal(err)
+			}
+			done, err := s.AddCanvasTodo("done overdue", mk(yesterday), 902, "C", "", "v1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.MarkTodoDone(done.ID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.AddCanvasTodo("overdue b", mk(yesterday), 903, "C", "", "v1"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.AddCanvasTodo("overdue a", mk(yesterday), 904, "C", "", "v1"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.AddCanvasTodo("due today", mk(today), 905, "C", "", "v1"); err != nil {
+				t.Fatal(err)
+			}
+
+			view, err := s.GetToday()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if view.Date != today {
+				t.Fatalf("want date %s, got %s", today, view.Date)
+			}
+			var got []string
+			for _, td := range view.DueTodos {
+				got = append(got, td.Content)
+			}
+			want := []string{"overdue b", "overdue a", "due today"}
+			if len(got) != len(want) {
+				t.Fatalf("want %v, got %v", want, got)
+			}
+			for i := range want {
+				if got[i] != want[i] {
+					t.Fatalf("want %v, got %v", want, got)
+				}
+			}
+		})
 	}
 }

@@ -394,10 +394,19 @@ func (s *JSONStore) GetToday() (models.TodayView, error) {
 
 	open := []models.Todo{}
 	for _, t := range s.todos {
-		if !t.Done {
-			open = append(open, t)
+		// Today shows open todos due today or overdue: undated and
+		// future-dated items live in `todo list`, not here.
+		if t.Done || t.DueAt == nil || dueDay(t.DueAt) > today {
+			continue
 		}
+		open = append(open, t)
 	}
+	sort.Slice(open, func(i, j int) bool {
+		if !open[i].DueAt.Equal(*open[j].DueAt) {
+			return open[i].DueAt.Before(*open[j].DueAt)
+		}
+		return open[i].ID < open[j].ID
+	})
 	views := []models.CheckoffView{}
 	for _, c := range s.checkoffs {
 		days := []string{}
@@ -415,7 +424,7 @@ func (s *JSONStore) GetToday() (models.TodayView, error) {
 			CheckedToday: checkedToday,
 		})
 	}
-	return models.TodayView{Date: today, OpenTodos: open, Checkoffs: views}, nil
+	return models.TodayView{Date: today, DueTodos: open, Checkoffs: views}, nil
 }
 
 // hasCheckoff reports whether the checkoff exists. Caller must hold s.mu.
@@ -583,4 +592,42 @@ func (s *JSONStore) SetLastCanvasSync(t time.Time) error {
 	defer s.mu.Unlock()
 	s.canvasLastSync = t.UTC().Format(time.RFC3339Nano)
 	return s.save()
+}
+
+// DetachCanvasCourse converts one course's imported todos/notes to plain
+// local items: origin, external ID, URL, and upstream timestamp are
+// cleared, while content (including the "[CODE] " prefix) and done state
+// are left exactly as the user left them.
+func (s *JSONStore) DetachCanvasCourse(courseID int64) (int, int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	code := ""
+	for _, c := range s.canvasCourses {
+		if c.CourseID == courseID {
+			code = c.Code
+		}
+	}
+	if code == "" {
+		return 0, 0, fmt.Errorf("canvas course %d: %w", courseID, ErrNotFound)
+	}
+	todos, notes := 0, 0
+	for i := range s.todos {
+		if s.todos[i].Origin == "canvas" && s.todos[i].CanvasCourseCode == code {
+			s.todos[i].Origin = ""
+			s.todos[i].CanvasAssignID = nil
+			s.todos[i].CanvasURL = ""
+			s.todos[i].CanvasUpdatedAt = ""
+			todos++
+		}
+	}
+	for i := range s.notes {
+		if s.notes[i].Origin == "canvas" && s.notes[i].CanvasCourseCode == code {
+			s.notes[i].Origin = ""
+			s.notes[i].CanvasAssignID = nil
+			s.notes[i].CanvasURL = ""
+			s.notes[i].CanvasUpdatedAt = ""
+			notes++
+		}
+	}
+	return todos, notes, s.save()
 }

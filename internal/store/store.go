@@ -62,6 +62,12 @@ type CanvasStore interface {
 	GetCanvasCourses() ([]models.CanvasCourse, error)
 	UpsertCanvasCourse(c models.CanvasCourse) (models.CanvasCourse, error)
 	ResolveCanvasCourse(courseID int64, excluded bool) error
+	// DetachCanvasCourse converts a course's imported todos/notes to plain
+	// local items (clearing origin and external IDs) and returns how many
+	// of each were converted. Excluding never deletes: the items stay, the
+	// course just stops importing. Re-including the course later re-imports
+	// its assignments as new items, so detachment is one-way by design.
+	DetachCanvasCourse(courseID int64) (todos, notes int, err error)
 	AddCanvasTodo(content string, dueAt *time.Time, assignmentID int64, courseCode, url, updatedAt string) (models.Todo, error)
 	GetTodoByCanvasID(assignmentID int64) (models.Todo, error)
 	UpdateCanvasTodo(id int, content string, dueAt *time.Time, courseCode, url, updatedAt string) error

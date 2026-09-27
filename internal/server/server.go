@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -39,10 +40,14 @@ import (
 //	                       check-offs with streaks, in one call
 //	GET    /canvas/courses refresh the tracked course list from Canvas
 //	                       (new courses arrive pending_confirm)
-//	PATCH  /canvas/courses/{id} resolve one course, body {"excluded": bool}
+//	PATCH  /canvas/courses/{id} resolve one course, body {"excluded": bool};
+//	                       answers the updated course plus detached counts
 //	POST   /canvas/sync    import published assignments, body
-//	                       {"decisions": {"<course_id>": bool}} mapping
-//	                       course ID -> excluded; absent entries stay pending
+//	                       {"mode": "manual"|"auto", "decisions": {"<course_id>": bool}}
+//	                       mapping course ID -> excluded; absent entries stay
+//	                       pending (manual) or import flagged pending (auto)
+//	GET    /canvas/status  sync probe: {"configured": bool, "last_sync_at": ...},
+//	                       never imports, never 501s
 //
 // Canvas routes need RILEIGHOS_CANVAS_TOKEN (and optionally
 // RILEIGHOS_CANVAS_BASE_URL, defaulting to uwmil.instructure.com). Without
@@ -79,6 +84,7 @@ func NewServer(store store.FullStore) *Server {
 	s.mux.HandleFunc("/canvas/courses", s.handleCanvasCourses)
 	s.mux.HandleFunc("/canvas/courses/", s.handleCanvasCourseByID)
 	s.mux.HandleFunc("/canvas/sync", s.handleCanvasSync)
+	s.mux.HandleFunc("/canvas/status", s.handleCanvasStatus)
 	return s
 }
 
@@ -584,6 +590,17 @@ func (s *Server) handleCanvasCourseByID(w http.ResponseWriter, r *http.Request) 
 		writeStoreError(w, err)
 		return
 	}
+	var detachedTodos, detachedNotes int
+	if *b.Excluded {
+		// Excluding converts already-imported items to local ones; the
+		// course stops importing but nothing the user has is deleted.
+		var err error
+		detachedTodos, detachedNotes, err = s.store.DetachCanvasCourse(int64(id))
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+	}
 	courses, err := s.store.GetCanvasCourses()
 	if err != nil {
 		writeStoreError(w, err)
@@ -591,7 +608,9 @@ func (s *Server) handleCanvasCourseByID(w http.ResponseWriter, r *http.Request) 
 	}
 	for _, c := range courses {
 		if c.CourseID == int64(id) {
-			writeJSON(w, http.StatusOK, c)
+			writeJSON(w, http.StatusOK, models.CourseResolveResult{
+				Course: c, DetachedTodos: detachedTodos, DetachedNotes: detachedNotes,
+			})
 			return
 		}
 	}
@@ -616,6 +635,14 @@ func (s *Server) handleCanvasSync(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body: %s", err)
 		return
 	}
+	mode := models.SyncModeManual
+	if b.Mode != "" {
+		mode = models.SyncMode(b.Mode)
+		if mode != models.SyncModeManual && mode != models.SyncModeAuto {
+			writeError(w, http.StatusBadRequest, "invalid mode %q: want \"manual\" or \"auto\"", b.Mode)
+			return
+		}
+	}
 	decisions := models.SyncDecisions{}
 	for raw, excluded := range b.Decisions {
 		id, err := strconv.ParseInt(raw, 10, 64)
@@ -625,7 +652,7 @@ func (s *Server) handleCanvasSync(w http.ResponseWriter, r *http.Request) {
 		}
 		decisions[id] = excluded
 	}
-	res, err := canvas.RunCanvasSync(s.store, cv, decisions)
+	res, err := canvas.RunCanvasSync(s.store, cv, mode, decisions)
 	if err != nil {
 		writeCanvasError(w, err)
 		return
@@ -634,4 +661,22 @@ func (s *Server) handleCanvasSync(w http.ResponseWriter, r *http.Request) {
 		res.PendingCourses = []models.CanvasCourse{}
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+// handleCanvasStatus serves GET /canvas/status: the cheap probe the CLI
+// uses to decide whether an on-open auto-sync is due. It never imports and
+// never requires a token: unconfigured servers answer configured=false.
+func (s *Server) handleCanvasStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, r, http.MethodGet)
+		return
+	}
+	status := models.CanvasStatus{Configured: os.Getenv("RILEIGHOS_CANVAS_TOKEN") != ""}
+	if last, err := s.store.GetLastCanvasSync(); err != nil {
+		writeStoreError(w, err)
+		return
+	} else if !last.IsZero() {
+		status.LastSyncAt = &last
+	}
+	writeJSON(w, http.StatusOK, status)
 }

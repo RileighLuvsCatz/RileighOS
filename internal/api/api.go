@@ -39,8 +39,11 @@ type CourseResolve struct {
 }
 
 // SyncRequest is the POST /canvas/sync request shape: course ID (as a JSON
-// string key) -> excluded. Absent entries leave the course pending; an
-// empty or missing body means no decisions.
+// string key) -> excluded, plus the import mode ("manual" skips unconfirmed
+// courses, "auto" imports them but keeps them pending). Absent decisions
+// leave the course pending; an empty mode defaults to manual, and an empty
+// or missing body means manual with no decisions.
 type SyncRequest struct {
+	Mode      string          `json:"mode"`
 	Decisions map[string]bool `json:"decisions"`
 }

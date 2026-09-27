@@ -3,6 +3,7 @@ package store
 import (
 	"errors"
 	"testing"
+	"time"
 )
 
 func TestCurrentStreak(t *testing.T) {
@@ -173,7 +174,15 @@ func TestGetToday(t *testing.T) {
 			if err := s.MarkTodoDone(done.ID); err != nil {
 				t.Fatal(err)
 			}
-			openTodo, err := s.AddTodo("still open")
+			// Undated open todos live in `todo list`, not today.
+			if _, err := s.AddTodo("still open"); err != nil {
+				t.Fatal(err)
+			}
+			dueToday, err := time.Parse(time.RFC3339, Today()+"T12:00:00Z")
+			if err != nil {
+				t.Fatal(err)
+			}
+			dueTodo, err := s.AddCanvasTodo("[C] due today", &dueToday, 911, "C", "", "v1")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -197,8 +206,8 @@ func TestGetToday(t *testing.T) {
 			if view.Date != Today() {
 				t.Fatalf("want date %s, got %s", Today(), view.Date)
 			}
-			if len(view.OpenTodos) != 1 || view.OpenTodos[0].ID != openTodo.ID {
-				t.Fatalf("want only open todo %+v, got %+v", openTodo, view.OpenTodos)
+			if len(view.DueTodos) != 1 || view.DueTodos[0].ID != dueTodo.ID {
+				t.Fatalf("want only due todo %+v, got %+v", dueTodo, view.DueTodos)
 			}
 			if len(view.Checkoffs) != 1 {
 				t.Fatalf("want 1 checkoff, got %+v", view.Checkoffs)

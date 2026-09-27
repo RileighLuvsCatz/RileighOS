@@ -10,6 +10,11 @@ Type=simple
 # creates /var/lib/rileighos (systemd-agnostic persistent state dir) owned
 # by this service's user, so --db stays valid across Pi OS reinstalls of
 # the package without hardcoding a home directory.
+# Canvas token lives in /etc/rileighos/env (root-owned 0600, see
+# deploy/README.md): out of the unit file, the journal, and ps output.
+# The leading dash makes it optional — Canvas is opt-in, and the service
+# must start cleanly without it.
+EnvironmentFile=-/etc/rileighos/env
 ExecStart=/usr/local/bin/rileighos serve --backend sqlite --db /var/lib/rileighos/rileighos.db --addr :8080
 Restart=always
 RestartSec=2

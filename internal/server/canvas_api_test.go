@@ -50,6 +50,7 @@ func (f *apiTestFake) serve(t *testing.T) string {
 			{ID: 102, Name: "Reading", Published: true, SubmissionTypes: []string{"none"}, HTMLURL: "http://canvas/102", UpdatedAt: "v1"},
 			{ID: 103, Name: "Draft", Published: false, SubmissionTypes: []string{"online_text_entry"}, DueAt: strptr(due), HTMLURL: "http://canvas/103", UpdatedAt: "v1", Submission: &apiTestSubmission{WorkflowState: "unsubmitted"}},
 			{ID: 104, Name: "Old quiz", Published: true, SubmissionTypes: []string{"online_quiz"}, DueAt: strptr(due), HTMLURL: "http://canvas/104", UpdatedAt: "v1", Submission: &apiTestSubmission{WorkflowState: "submitted"}},
+			{ID: 105, Name: "Overdue worksheet", Published: true, SubmissionTypes: []string{"online_text_entry"}, DueAt: strptr("2026-09-20T23:59:00-05:00"), HTMLURL: "http://canvas/105", UpdatedAt: "v1", Submission: &apiTestSubmission{WorkflowState: "unsubmitted"}},
 		},
 		2: {
 			{ID: 201, Name: "Lab 3", Published: true, SubmissionTypes: []string{"online_upload"}, DueAt: strptr(due), HTMLURL: "http://canvas/201", UpdatedAt: "v1", Submission: &apiTestSubmission{WorkflowState: "unsubmitted"}},
@@ -163,22 +164,27 @@ func TestCanvasSyncAPI(t *testing.T) {
 		t.Fatalf("want 0 imported 2 pending, got %+v", res)
 	}
 
-	// Sync with decisions imports (art todo + note, comp lab).
+	// Sync with decisions imports (art todos + note + overdue, comp lab).
 	status, data = doRaw(t, http.MethodPost, base+"/canvas/sync", `{"decisions":{"1":false,"2":false}}`)
 	if status != http.StatusOK {
 		t.Fatalf("POST sync decided: want 200, got %d (%s)", status, data)
 	}
-	if res := decodeBody[models.SyncResult](t, data); res.Imported != 3 || res.Skipped != 2 {
-		t.Fatalf("want 3 imported 2 skipped, got %+v", res)
+	if res := decodeBody[models.SyncResult](t, data); res.Imported != 4 || res.Skipped != 2 {
+		t.Fatalf("want 4 imported 2 skipped, got %+v", res)
 	}
 
-	// Resolve one course excluded, then back.
+	// Resolve one course excluded, then back. Excluding detaches its
+	// imported items to local (art has 3: essay, overdue, reading note).
 	status, data = doRaw(t, http.MethodPatch, base+"/canvas/courses/1", `{"excluded":true}`)
 	if status != http.StatusOK {
 		t.Fatalf("PATCH course: want 200, got %d (%s)", status, data)
 	}
-	if got := decodeBody[models.CanvasCourse](t, data); !got.Excluded || got.PendingConfirm {
-		t.Fatalf("want excluded confirmed course, got %+v", got)
+	resolved := decodeBody[models.CourseResolveResult](t, data)
+	if !resolved.Course.Excluded || resolved.Course.PendingConfirm {
+		t.Fatalf("want excluded confirmed course, got %+v", resolved)
+	}
+	if resolved.DetachedTodos != 2 || resolved.DetachedNotes != 1 {
+		t.Fatalf("want 2+1 detached, got %+v", resolved)
 	}
 	if status, _ := doRaw(t, http.MethodPatch, base+"/canvas/courses/1", `{"excluded":false}`); status != http.StatusOK {
 		t.Fatalf("PATCH include: want 200, got %d", status)
@@ -265,7 +271,7 @@ func TestClientCanvasRoundTrip(t *testing.T) {
 	if _, err := c.ResolveCanvasCourse(artID, true); err != nil {
 		t.Fatal(err)
 	}
-	res, err := c.SyncCanvas(models.SyncDecisions{artID: true, 2: false})
+	res, err := c.SyncCanvas(models.SyncModeManual, models.SyncDecisions{artID: true, 2: false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,4 +294,51 @@ func TestClientCanvasRoundTrip(t *testing.T) {
 	if _, err := c.ResolveCanvasCourse(999, true); err == nil {
 		t.Fatal("want error resolving unknown course over HTTP")
 	}
+}
+
+func TestCanvasStatus(t *testing.T) {
+	// Unconfigured servers answer configured=false (never 501): the
+	// status probe must work precisely when Canvas is absent.
+	t.Setenv("RILEIGHOS_CANVAS_TOKEN", "")
+	base := openTestServer(t, "sqlite")
+	status, data := doRaw(t, http.MethodGet, base+"/canvas/status", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET status: want 200, got %d (%s)", status, data)
+	}
+	st := decodeBody[models.CanvasStatus](t, data)
+	if st.Configured || st.LastSyncAt != nil {
+		t.Fatalf("want unconfigured never-synced, got %+v", st)
+	}
+
+	// Configured with a sync behind it: last_sync_at present.
+	fake := &apiTestFake{token: canvasTestSecret}
+	withCanvasEnv(t, fake.serve(t))
+	base = openTestServer(t, "sqlite")
+	if status, _ := doRaw(t, http.MethodPost, base+"/canvas/sync", `{"decisions":{"1":false,"2":false}}`); status != http.StatusOK {
+		t.Fatalf("POST sync: want 200, got %d", status)
+	}
+	status, data = doRaw(t, http.MethodGet, base+"/canvas/status", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET status: want 200, got %d (%s)", status, data)
+	}
+	assertNoLeak(t, data)
+	st = decodeBody[models.CanvasStatus](t, data)
+	if !st.Configured || st.LastSyncAt == nil {
+		t.Fatalf("want configured with last sync, got %+v", st)
+	}
+
+	if status, _ := doRaw(t, http.MethodPost, base+"/canvas/status", ""); status != http.StatusMethodNotAllowed {
+		t.Fatalf("POST status: want 405, got %d", status)
+	}
+}
+
+func TestCanvasSyncBadMode(t *testing.T) {
+	fake := &apiTestFake{token: canvasTestSecret}
+	withCanvasEnv(t, fake.serve(t))
+	base := openTestServer(t, "sqlite")
+	status, data := doRaw(t, http.MethodPost, base+"/canvas/sync", `{"mode":"sometimes"}`)
+	if status != http.StatusBadRequest {
+		t.Fatalf("POST sync bad mode: want 400, got %d (%s)", status, data)
+	}
+	assertNoLeak(t, data)
 }

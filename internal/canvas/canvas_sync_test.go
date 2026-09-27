@@ -205,7 +205,7 @@ func TestCanvasSyncImport(t *testing.T) {
 	for backend, open := range openCanvasTestStores(t) {
 		t.Run(backend, func(t *testing.T) {
 			s, cv, _ := setupSyncTest(t, backend, open)
-			res, err := RunCanvasSync(s, cv, includeAll())
+			res, err := RunCanvasSync(s, cv, models.SyncModeManual, includeAll())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -241,10 +241,10 @@ func TestCanvasSyncIdempotent(t *testing.T) {
 	for backend, open := range openCanvasTestStores(t) {
 		t.Run(backend, func(t *testing.T) {
 			s, cv, _ := setupSyncTest(t, backend, open)
-			if _, err := RunCanvasSync(s, cv, includeAll()); err != nil {
+			if _, err := RunCanvasSync(s, cv, models.SyncModeManual, includeAll()); err != nil {
 				t.Fatal(err)
 			}
-			res, err := RunCanvasSync(s, cv, includeAll())
+			res, err := RunCanvasSync(s, cv, models.SyncModeManual, includeAll())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -259,11 +259,11 @@ func TestCanvasSyncStatusReflection(t *testing.T) {
 	for backend, open := range openCanvasTestStores(t) {
 		t.Run(backend, func(t *testing.T) {
 			s, cv, fake := setupSyncTest(t, backend, open)
-			if _, err := RunCanvasSync(s, cv, includeAll()); err != nil {
+			if _, err := RunCanvasSync(s, cv, models.SyncModeManual, includeAll()); err != nil {
 				t.Fatal(err)
 			}
 			fake.setSubmission(1, 101, "submitted")
-			res, err := RunCanvasSync(s, cv, includeAll())
+			res, err := RunCanvasSync(s, cv, models.SyncModeManual, includeAll())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -275,12 +275,12 @@ func TestCanvasSyncStatusReflection(t *testing.T) {
 			}
 			// Graded counts as submitted too.
 			fake.setSubmission(1, 101, "graded")
-			if res, err := RunCanvasSync(s, cv, includeAll()); err != nil || res.Completed != 0 {
+			if res, err := RunCanvasSync(s, cv, models.SyncModeManual, includeAll()); err != nil || res.Completed != 0 {
 				t.Fatalf("graded stays done quietly: %+v, err %v", res, err)
 			}
 			// Mirror: unsubmit reopens.
 			fake.setSubmission(1, 101, "unsubmitted")
-			res, err = RunCanvasSync(s, cv, includeAll())
+			res, err = RunCanvasSync(s, cv, models.SyncModeManual, includeAll())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -298,11 +298,11 @@ func TestCanvasSyncUpdate(t *testing.T) {
 	for backend, open := range openCanvasTestStores(t) {
 		t.Run(backend, func(t *testing.T) {
 			s, cv, fake := setupSyncTest(t, backend, open)
-			if _, err := RunCanvasSync(s, cv, includeAll()); err != nil {
+			if _, err := RunCanvasSync(s, cv, models.SyncModeManual, includeAll()); err != nil {
 				t.Fatal(err)
 			}
 			fake.setAssignment(1, 101, "Essay (revised)", "2026-10-08T23:59:00-05:00", "v2")
-			res, err := RunCanvasSync(s, cv, includeAll())
+			res, err := RunCanvasSync(s, cv, models.SyncModeManual, includeAll())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -323,7 +323,7 @@ func TestCanvasSyncGating(t *testing.T) {
 			s, cv, _ := setupSyncTest(t, backend, open)
 
 			// No decisions: nothing imports, both courses pending.
-			res, err := RunCanvasSync(s, cv, nil)
+			res, err := RunCanvasSync(s, cv, models.SyncModeManual, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -336,7 +336,7 @@ func TestCanvasSyncGating(t *testing.T) {
 
 			// Exclude ART and include COMP: only COMP SCI imports. Absent
 			// entries stay pending, so COMP needs an explicit decision.
-			res, err = RunCanvasSync(s, cv, models.SyncDecisions{1: true, 2: false})
+			res, err = RunCanvasSync(s, cv, models.SyncModeManual, models.SyncDecisions{1: true, 2: false})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -348,7 +348,7 @@ func TestCanvasSyncGating(t *testing.T) {
 			}
 
 			// Decisions persist: later syncs never re-ask excluded courses.
-			res, err = RunCanvasSync(s, cv, nil)
+			res, err = RunCanvasSync(s, cv, models.SyncModeManual, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -359,7 +359,7 @@ func TestCanvasSyncGating(t *testing.T) {
 			}
 
 			// Include ART later: its items import then.
-			res, err = RunCanvasSync(s, cv, models.SyncDecisions{1: false})
+			res, err = RunCanvasSync(s, cv, models.SyncModeManual, models.SyncDecisions{1: false})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -374,11 +374,11 @@ func TestCanvasSyncTypeMigration(t *testing.T) {
 	for backend, open := range openCanvasTestStores(t) {
 		t.Run(backend, func(t *testing.T) {
 			s, cv, fake := setupSyncTest(t, backend, open)
-			if _, err := RunCanvasSync(s, cv, includeAll()); err != nil {
+			if _, err := RunCanvasSync(s, cv, models.SyncModeManual, includeAll()); err != nil {
 				t.Fatal(err)
 			}
 			fake.setTypes(1, 102, []string{"online_text_entry"})
-			if _, err := RunCanvasSync(s, cv, includeAll()); err != nil {
+			if _, err := RunCanvasSync(s, cv, models.SyncModeManual, includeAll()); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := s.GetNoteByCanvasID(102); !errors.Is(err, store.ErrNotFound) {
@@ -471,5 +471,138 @@ func TestCanvasAuthAndTokenHygiene(t *testing.T) {
 		t.Fatalf("want upstream error, got %v", err)
 	} else if strings.Contains(err.Error(), secret) {
 		t.Fatalf("error must never echo the token: %v", err)
+	}
+}
+
+func TestCanvasSyncAuto(t *testing.T) {
+	for backend, open := range openCanvasTestStores(t) {
+		t.Run(backend, func(t *testing.T) {
+			s, cv, _ := setupSyncTest(t, backend, open)
+
+			// Auto mode imports unconfirmed courses but keeps them
+			// pending, so the next manual sync still asks.
+			res, err := RunCanvasSync(s, cv, models.SyncModeAuto, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Imported != 3 || len(res.PendingCourses) != 2 {
+				t.Fatalf("want 3 imported 2 pending, got %+v", res)
+			}
+			if _, err := s.GetTodoByCanvasID(101); err != nil {
+				t.Fatalf("auto must import: %v", err)
+			}
+
+			// Manual with no decisions still skips pending (nothing new).
+			res, err = RunCanvasSync(s, cv, models.SyncModeManual, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Imported != 0 || len(res.PendingCourses) != 2 {
+				t.Fatalf("manual must not import pending: %+v", res)
+			}
+		})
+	}
+}
+
+func TestCanvasSyncDetachOnExclude(t *testing.T) {
+	for backend, open := range openCanvasTestStores(t) {
+		t.Run(backend, func(t *testing.T) {
+			s, cv, _ := setupSyncTest(t, backend, open)
+			if _, err := RunCanvasSync(s, cv, models.SyncModeManual, includeAll()); err != nil {
+				t.Fatal(err)
+			}
+			// Mark the essay done first: detachment must preserve it.
+			essay, err := s.GetTodoByCanvasID(101)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.MarkTodoDone(essay.ID); err != nil {
+				t.Fatal(err)
+			}
+
+			res, err := RunCanvasSync(s, cv, models.SyncModeManual, models.SyncDecisions{1: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.DetachedTodos != 1 || res.DetachedNotes != 1 {
+				t.Fatalf("want 1 todo + 1 note detached, got %+v", res)
+			}
+			todos, err := s.GetTodos()
+			if err != nil {
+				t.Fatal(err)
+			}
+			kept := 0
+			for _, td := range todos {
+				// ART items detach; COMP SCI stays linked.
+				if td.CanvasCourseCode == "ART 150" {
+					if td.CanvasAssignID != nil {
+						t.Fatalf("detached todo still linked: %+v", td)
+					}
+					if td.Content == "[ART 150] Essay" {
+						kept++
+						if !td.Done {
+							t.Fatalf("detachment must preserve done: %+v", td)
+						}
+					}
+				} else if td.CanvasAssignID == nil {
+					t.Fatalf("non-excluded todo must stay linked: %+v", td)
+				}
+			}
+			if kept != 1 {
+				t.Fatalf("detached content must survive, todos: %+v", todos)
+			}
+			if _, err := s.GetTodoByCanvasID(101); !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("detached lookup must miss: %v", err)
+			}
+		})
+	}
+}
+
+func TestSyncStale(t *testing.T) {
+	now := time.Now()
+	if !SyncStale(time.Time{}, now, time.Minute) {
+		t.Fatal("never synced must be stale")
+	}
+	if !SyncStale(now.Add(-time.Hour), now, 15*time.Minute) {
+		t.Fatal("old sync must be stale")
+	}
+	if SyncStale(now.Add(-time.Minute), now, 15*time.Minute) {
+		t.Fatal("fresh sync must not be stale")
+	}
+}
+
+func TestParseInterval(t *testing.T) {
+	d, enabled, err := ParseInterval("", 30*time.Minute)
+	if err != nil || !enabled || d != 30*time.Minute {
+		t.Fatalf("empty must mean default: %v %v %v", d, enabled, err)
+	}
+	d, enabled, err = ParseInterval("10m", 30*time.Minute)
+	if err != nil || !enabled || d != 10*time.Minute {
+		t.Fatalf("explicit must parse: %v %v %v", d, enabled, err)
+	}
+	if _, enabled, err := ParseInterval("0", 30*time.Minute); err != nil || enabled {
+		t.Fatalf("zero must disable: %v %v", enabled, err)
+	}
+	if _, _, err := ParseInterval("soon", 30*time.Minute); err == nil {
+		t.Fatal("garbage must error")
+	}
+}
+
+func TestSuggestWorkSessionsStub(t *testing.T) {
+	if got := SuggestWorkSessions(nil, time.Now(), 7); got != nil {
+		t.Fatalf("stub must return nil, got %+v", got)
+	}
+}
+
+func TestFormatInterval(t *testing.T) {
+	cases := map[time.Duration]string{
+		30 * time.Minute: "30m",
+		time.Hour:        "1h",
+		90 * time.Second: "1m30s",
+	}
+	for d, want := range cases {
+		if got := FormatInterval(d); got != want {
+			t.Fatalf("FormatInterval(%v) = %q, want %q", d, got, want)
+		}
 	}
 }

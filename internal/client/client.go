@@ -37,8 +37,9 @@ var _ store.Store = (*Client)(nil)
 // server-side only, so Client deliberately does not implement FullStore.
 type CanvasSyncer interface {
 	GetCanvasCourses() ([]models.CanvasCourse, error)
-	SyncCanvas(models.SyncDecisions) (models.SyncResult, error)
-	ResolveCanvasCourse(int64, bool) (models.CanvasCourse, error)
+	GetCanvasStatus() (models.CanvasStatus, error)
+	SyncCanvas(models.SyncMode, models.SyncDecisions) (models.SyncResult, error)
+	ResolveCanvasCourse(int64, bool) (models.CourseResolveResult, error)
 }
 
 // Compile-time check that Client satisfies CanvasSyncer.
@@ -261,22 +262,33 @@ func (c *Client) GetCanvasCourses() ([]models.CanvasCourse, error) {
 
 // SyncCanvas runs one import with decisions mapping course ID -> excluded.
 // Courses absent from decisions stay pending.
-func (c *Client) SyncCanvas(decisions models.SyncDecisions) (models.SyncResult, error) {
+func (c *Client) GetCanvasStatus() (models.CanvasStatus, error) {
+	var status models.CanvasStatus
+	if err := c.do(http.MethodGet, "/canvas/status", nil, &status); err != nil {
+		return models.CanvasStatus{}, err
+	}
+	return status, nil
+}
+
+// SyncCanvas runs one import in the given mode with decisions mapping
+// course ID -> excluded. Courses absent from decisions stay pending
+// (manual) or import flagged pending (auto).
+func (c *Client) SyncCanvas(mode models.SyncMode, decisions models.SyncDecisions) (models.SyncResult, error) {
 	raw := map[string]bool{}
 	for id, excluded := range decisions {
 		raw[strconv.FormatInt(id, 10)] = excluded
 	}
 	var res models.SyncResult
-	if err := c.do(http.MethodPost, "/canvas/sync", api.SyncRequest{Decisions: raw}, &res); err != nil {
+	if err := c.do(http.MethodPost, "/canvas/sync", api.SyncRequest{Mode: string(mode), Decisions: raw}, &res); err != nil {
 		return models.SyncResult{}, err
 	}
 	return res, nil
 }
 
-func (c *Client) ResolveCanvasCourse(courseID int64, excluded bool) (models.CanvasCourse, error) {
-	var course models.CanvasCourse
-	if err := c.do(http.MethodPatch, fmt.Sprintf("/canvas/courses/%d", courseID), api.CourseResolve{Excluded: &excluded}, &course); err != nil {
-		return models.CanvasCourse{}, err
+func (c *Client) ResolveCanvasCourse(courseID int64, excluded bool) (models.CourseResolveResult, error) {
+	var res models.CourseResolveResult
+	if err := c.do(http.MethodPatch, fmt.Sprintf("/canvas/courses/%d", courseID), api.CourseResolve{Excluded: &excluded}, &res); err != nil {
+		return models.CourseResolveResult{}, err
 	}
-	return course, nil
+	return res, nil
 }
