@@ -20,7 +20,7 @@ Restart=always
 RestartSec=2
 # Replace `pi` with your actual Pi login user if different (`whoami`).
 # StateDirectory ownership follows this user automatically.
-User=pi
+User=pileigh
 StateDirectory=rileighos
 StateDirectoryMode=0750
 NoNewPrivileges=true
