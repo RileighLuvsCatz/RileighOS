@@ -65,6 +65,28 @@ systemctl status rileighos --no-pager
 journalctl -u rileighos -f  # startup line: listening on http://localhost:8080 (backend sqlite)
 ```
 
+## 4b. Canvas token on the Pi (optional, opt-in)
+
+The server reads the token from `RILEIGHOS_CANVAS_TOKEN`; the unit loads
+it from `/etc/rileighos/env` (optional file — the service starts fine
+without it, with Canvas routes answering 501). Never put the token in the
+unit file itself (world-readable) or on the command line (visible in `ps`).
+
+```sh
+# on the Pi, once per token (rotate semesterly in Canvas → Account → Settings)
+sudo install -m 0700 -d /etc/rileighos
+printf 'RILEIGHOS_CANVAS_TOKEN=%s\n' '<paste-token>' | sudo tee /etc/rileighos/env >/dev/null
+sudo chmod 0600 /etc/rileighos/env
+sudo systemctl restart rileighos
+journalctl -u rileighos | grep -i canvas  # expect: "canvas auto-sync every 30m"
+# tune the ticker (default 30m, "0" disables):
+# sudo sh -c 'printf "RILEIGHOS_CANVAS_SYNC_INTERVAL=1h\n" >> /etc/rileighos/env' && sudo systemctl restart rileighos
+```
+
+On your laptop the same variable lives in `~/.bashrc`
+(`export RILEIGHOS_CANVAS_TOKEN=...`, file `chmod 600`) for local `serve`
+use; once the Pi serves, the laptop doesn't need it at all.
+
 What the unit does (`deploy/rileighos.service`):
 
 - `ExecStart=/usr/local/bin/rileighos serve --backend sqlite --db /var/lib/rileighos/rileighos.db --addr :8080`

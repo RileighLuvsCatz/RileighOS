@@ -1,0 +1,50 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -count=1 ./...
+
+      - name: Build Pi binary (linux/arm64)
+        run: |
+          TAG="${GITHUB_REF_NAME:-dev}"
+          GOOS=linux GOARCH=arm64 go build \
+            -ldflags "-X main.version=${TAG}" \
+            -o rileighos-linux-arm64 \
+            ./cmd/rileighos
+          file rileighos-linux-arm64
+          ./rileighos-linux-arm64 --help >/dev/null || true
+        env:
+          CGO_ENABLED: "0"
+
+      - name: Checksum
+        run: sha256sum rileighos-linux-arm64 | tee rileighos-linux-arm64.sha256
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            rileighos-linux-arm64
+            rileighos-linux-arm64.sha256
+          generate_release_notes: true

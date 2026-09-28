@@ -80,6 +80,11 @@ canvas commands (needs RILEIGHOS_CANVAS_TOKEN on the server):
   rileighos canvas include <code|id>   import a course (clears pending)
 `
 
+// version is stamped at release time via:
+// go build -ldflags "-X main.version=vX.Y.Z" ./cmd/rileighos
+// Local builds report "dev".
+var version = "dev"
+
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -159,8 +164,11 @@ func run(args []string) error {
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		return nil
+	case "version", "--version", "-v":
+		fmt.Println(version)
+		return nil
 	default:
-		return fmt.Errorf("unknown resource %q (want serve, todo, note, checkoff, canvas or today)\n\n%s", resource, usage)
+		return fmt.Errorf("unknown resource %q (want serve, todo, note, checkoff, canvas, today or version)\n\n%s", resource, usage)
 	}
 }
 

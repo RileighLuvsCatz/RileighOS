@@ -31,10 +31,19 @@ rileighos checkoff show 1
 
 # 3. The punchline: one call
 rileighos today
-# open todos + every habit with streak/checked-today. Server assembles it
+# check-off status, then todos due today or overdue. Server assembles it
 # (GET /today), so CLI, TUI, and future GUI all share the answer.
 
-# 4. Error handling (30 seconds, memorable)
+# 4. Canvas import (the day-to-day hook, needs RILEIGHOS_CANVAS_TOKEN on server)
+rileighos canvas sync
+# first run asks per course: [y]es / [n]o / [Enter] later. Excluding later
+# converts already-imported items to plain local todos — nothing is deleted.
+rileighos canvas courses            # gating state: active / excluded / pending
+rileighos today                     # synced assignments due today show up here
+# say: "submitted upstream marks the todo done automatically — manual sync,
+# on-open sync, and a server ticker all share one idempotent path."
+
+# 5. Error handling (30 seconds, memorable)
 kill %1  # stop server  — or: RILEIGHOS_SERVER_URL=http://localhost:9999 rileighos todo list
 rileighos todo list
 # expect: "cannot reach server at ... (is it running? try `rileighos serve`)"
@@ -60,6 +69,6 @@ rileighos checkoff add "exercise"
 
 ## Don't demo
 
-Calendar/Canvas sync (deferred — say why, see `ARCHITECTURE.md`), TUI, Discord,
+Calendar OAuth (deferred — say why, see `ARCHITECTURE.md`), TUI, Discord,
 trackers. If asked: "OAuth is the biggest time risk, cut from pre-fair scope
-by design."
+by design — Canvas uses a personal token instead, no OAuth involved."
