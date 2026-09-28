@@ -690,9 +690,10 @@ func TestCanvasSyncDismissBeforeImport(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			// Essay never imports; Reading note + Lab todo do.
-			if res.Imported != 2 {
-				t.Fatalf("want 2 imported with 101 dismissed, got %+v", res)
+			// Essay never imports; everything else does (Lab todo, Reading
+			// note, plus the not_graded Week 1 and Syllabus notes).
+			if res.Imported != 4 {
+				t.Fatalf("want 4 imported with 101 dismissed, got %+v", res)
 			}
 			if _, err := s.GetTodoByCanvasID(101); !errors.Is(err, store.ErrNotFound) {
 				t.Fatalf("pre-dismissed todo must never import, got %v", err)
