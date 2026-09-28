@@ -25,6 +25,8 @@ import (
 //	POST   /todos          create a todo, body {"content": "..."} -> 201
 //	GET    /todos/{id}     fetch one todo
 //	PATCH  /todos/{id}     flip done state, body {"done": true|false}
+//	PUT    /todos/{id}/work-date set personal work date, body {"date": "YYYY-MM-DD"|"today"}
+//	DELETE /todos/{id}/work-date clear personal work date
 //	DELETE /todos/{id}     delete a todo -> 204
 //	GET    /notes          list all notes
 //	POST   /notes          create a note, body {"content": "..."} -> 201
@@ -36,8 +38,7 @@ import (
 //	DELETE /checkoffs/{id} delete a checkoff and its days -> 204
 //	POST   /checkoffs/{id}/check   check a day, body {} or {"day": "YYYY-MM-DD"} -> 200
 //	DELETE /checkoffs/{id}/check   uncheck a day, same body shape -> 200
-//	GET    /today          "what does my day look like": open todos plus
-//	                       check-offs with streaks, in one call
+//	GET    /today          overdue, planned, and due open todos plus check-offs
 //	GET    /canvas/courses refresh the tracked course list from Canvas
 //	                       (new courses arrive pending_confirm)
 //	PATCH  /canvas/courses/{id} resolve one course, body {"excluded": bool};
@@ -194,6 +195,10 @@ func (s *Server) handleTodos(w http.ResponseWriter, r *http.Request) {
 
 // handleTodoByID dispatches the /todos/{id} member route.
 func (s *Server) handleTodoByID(w http.ResponseWriter, r *http.Request) {
+	if strings.HasSuffix(r.URL.Path, "/work-date") {
+		s.handleTodoWorkDate(w, r)
+		return
+	}
 	raw, ok := memberID(w, r.URL.Path, "/todos/", "todo")
 	if !ok {
 		return
@@ -221,6 +226,45 @@ func (s *Server) handleTodoByID(w http.ResponseWriter, r *http.Request) {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+func (s *Server) handleTodoWorkDate(w http.ResponseWriter, r *http.Request) {
+	raw := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/todos/"), "/work-date")
+	if raw == "" || strings.Contains(raw, "/") {
+		writeError(w, http.StatusNotFound, "no such todo route %q", r.URL.Path)
+		return
+	}
+	if r.Method != http.MethodPut && r.Method != http.MethodDelete {
+		methodNotAllowed(w, r, http.MethodPut, http.MethodDelete)
+		return
+	}
+	id, ok := pathID(w, raw, "todo")
+	if !ok {
+		return
+	}
+	if r.Method == http.MethodPut {
+		r.Body = http.MaxBytesReader(nil, r.Body, 1<<20)
+		var body api.WorkDateBody
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid request body: %s", err)
+			return
+		}
+		if body.Date != "today" && !store.ValidDay(body.Date) {
+			writeError(w, http.StatusBadRequest, "invalid work date %q: want YYYY-MM-DD or today", body.Date)
+			return
+		}
+		if err := s.store.SetTodoWorkDate(id, body.Date); err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		s.getTodo(w, id)
+		return
+	}
+	if err := s.store.ClearTodoWorkDate(id); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleListTodos(w http.ResponseWriter, _ *http.Request) {

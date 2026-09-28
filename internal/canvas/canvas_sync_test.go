@@ -433,6 +433,48 @@ func TestCanvasSyncTypeMigration(t *testing.T) {
 	}
 }
 
+func TestCanvasSyncPreservesPersonalWorkDate(t *testing.T) {
+	for backend, open := range openCanvasTestStores(t) {
+		t.Run(backend, func(t *testing.T) {
+			s, cv, fake := setupSyncTest(t, backend, open)
+			if _, err := RunCanvasSync(s, cv, models.SyncModeManual, includeAll()); err != nil {
+				t.Fatal(err)
+			}
+			essay, err := s.GetTodoByCanvasID(101)
+			if err != nil {
+				t.Fatal(err)
+			}
+			day := store.Today()
+			if err := s.SetTodoWorkDate(essay.ID, day); err != nil {
+				t.Fatal(err)
+			}
+			fake.setAssignment(1, 101, "Essay revised", "2026-10-02T23:59:00-05:00", "v2")
+			if _, err := RunCanvasSync(s, cv, models.SyncModeManual, includeAll()); err != nil {
+				t.Fatal(err)
+			}
+			updated, err := s.GetTodo(essay.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if updated.WorkDate == nil || *updated.WorkDate != day || updated.Content != "[ART 150] Essay revised" {
+				t.Fatalf("Canvas update changed personal date or missed content: %+v", updated)
+			}
+			fake.setTypes(1, 101, []string{"not_graded"})
+			fake.setGradingType(1, 101, "not_graded")
+			if _, err := RunCanvasSync(s, cv, models.SyncModeManual, includeAll()); err != nil {
+				t.Fatal(err)
+			}
+			kept, err := s.GetTodo(essay.ID)
+			if err != nil || kept.Origin != "" || kept.CanvasAssignID != nil || kept.WorkDate == nil || *kept.WorkDate != day {
+				t.Fatalf("planned todo should survive as local work: %+v, %v", kept, err)
+			}
+			if _, err := s.GetNoteByCanvasID(101); err != nil {
+				t.Fatalf("reference note should import: %v", err)
+			}
+		})
+	}
+}
+
 func TestMapAssignment(t *testing.T) {
 	course := CanvasCourseInfo{ID: 1, Code: "ART 150", Name: "Drawing I"}
 	cases := []struct {

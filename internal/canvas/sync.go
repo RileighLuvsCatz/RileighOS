@@ -132,8 +132,16 @@ func importItem(s store.FullStore, item models.CanvasItem, res *models.SyncResul
 	}
 	if todoErr == nil {
 		// Was a todo, now reference-only: migrate across types.
-		if err := s.DeleteTodo(todo.ID); err != nil {
-			return err
+		// A personal work plan belongs to the user. Keep that todo as
+		// local work while importing the Canvas item as a note.
+		if todo.WorkDate != nil {
+			if err := s.DetachCanvasTodo(todo.ID); err != nil {
+				return err
+			}
+		} else {
+			if err := s.DeleteTodo(todo.ID); err != nil {
+				return err
+			}
 		}
 	}
 	return importNote(s, item, res, note, noteErr == nil)

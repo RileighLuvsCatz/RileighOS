@@ -458,8 +458,8 @@ func TestTodayAPI(t *testing.T) {
 			if view.Date != store.Today() {
 				t.Fatalf("want date %s, got %s", store.Today(), view.Date)
 			}
-			if len(view.DueTodos) != 1 || view.DueTodos[0].Content != "[ART 150] Overdue worksheet" {
-				t.Fatalf("want only the overdue canvas todo, got %+v", view.DueTodos)
+			if len(view.OverdueTodos) != 1 || view.OverdueTodos[0].Content != "[ART 150] Overdue worksheet" || !view.OverdueTodos[0].OverdueDueDate {
+				t.Fatalf("want only the overdue canvas todo, got %+v", view.OverdueTodos)
 			}
 			if len(view.Checkoffs) != 1 {
 				t.Fatalf("want 1 checkoff, got %+v", view.Checkoffs)
@@ -471,6 +471,51 @@ func TestTodayAPI(t *testing.T) {
 			// Wrong method still uses the shared JSON error shape.
 			if status, _ := doRaw(t, http.MethodPost, base+"/today", ""); status != http.StatusMethodNotAllowed {
 				t.Fatalf("POST /today: want 405, got %d", status)
+			}
+		})
+	}
+}
+
+func TestTodoWorkDateAPI(t *testing.T) {
+	for _, backend := range testBackends {
+		t.Run(backend, func(t *testing.T) {
+			base := openTestServer(t, backend)
+			status, data := doRaw(t, http.MethodPost, base+"/todos", `{"content":"start project"}`)
+			if status != http.StatusCreated {
+				t.Fatalf("create todo: %d %s", status, data)
+			}
+			id := decodeBody[models.Todo](t, data).ID
+			url := fmt.Sprintf("%s/todos/%d/work-date", base, id)
+			for _, bad := range []string{`{"date":"2026-02-30"}`, `{"date":""}`, `{"date":"tomorrow"}`} {
+				if status, _ := doRaw(t, http.MethodPut, url, bad); status != http.StatusBadRequest {
+					t.Fatalf("bad date %s: want 400, got %d", bad, status)
+				}
+			}
+			status, data = doRaw(t, http.MethodPut, url, `{"date":"today"}`)
+			if status != http.StatusOK {
+				t.Fatalf("set date: %d %s", status, data)
+			}
+			got := decodeBody[models.Todo](t, data)
+			if got.WorkDate == nil || *got.WorkDate != store.Today() {
+				t.Fatalf("server did not resolve today: %+v", got)
+			}
+			status, data = doRaw(t, http.MethodGet, base+"/today", "")
+			if status != http.StatusOK {
+				t.Fatalf("today: %d %s", status, data)
+			}
+			view := decodeBody[models.TodayView](t, data)
+			if len(view.PlannedTodos) != 1 || view.PlannedTodos[0].ID != id {
+				t.Fatalf("planned item missing: %+v", view)
+			}
+			if status, _ := doRaw(t, http.MethodDelete, url, ""); status != http.StatusNoContent {
+				t.Fatalf("clear date: want 204, got %d", status)
+			}
+			status, data = doRaw(t, http.MethodGet, fmt.Sprintf("%s/todos/%d", base, id), "")
+			if status != http.StatusOK || decodeBody[models.Todo](t, data).WorkDate != nil {
+				t.Fatalf("work date still set: %d %s", status, data)
+			}
+			if status, _ := doRaw(t, http.MethodPut, fmt.Sprintf("%s/todos/999/work-date", base), `{"date":"today"}`); status != http.StatusNotFound {
+				t.Fatalf("missing todo: want 404, got %d", status)
 			}
 		})
 	}

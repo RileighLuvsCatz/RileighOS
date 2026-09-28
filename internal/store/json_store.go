@@ -206,6 +206,30 @@ func (s *JSONStore) MarkTodoUndone(id int) error {
 	return s.setTodoDone(id, false)
 }
 
+func (s *JSONStore) SetTodoWorkDate(id int, day string) error {
+	day, err := NormalizeWorkDate(day)
+	if err != nil {
+		return err
+	}
+	return s.updateTodoWorkDate(id, &day)
+}
+
+func (s *JSONStore) ClearTodoWorkDate(id int) error {
+	return s.updateTodoWorkDate(id, nil)
+}
+
+func (s *JSONStore) updateTodoWorkDate(id int, day *string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.todos {
+		if s.todos[i].ID == id {
+			s.todos[i].WorkDate = day
+			return s.save()
+		}
+	}
+	return fmt.Errorf("todo %d: %w", id, ErrNotFound)
+}
+
 func (s *JSONStore) setTodoDone(id int, done bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -407,21 +431,7 @@ func (s *JSONStore) GetToday() (models.TodayView, error) {
 	defer s.mu.Unlock()
 	today := Today()
 
-	open := []models.Todo{}
-	for _, t := range s.todos {
-		// Today shows open todos due today or overdue: undated and
-		// future-dated items live in `todo list`, not here.
-		if t.Done || t.DueAt == nil || dueDay(t.DueAt) > today {
-			continue
-		}
-		open = append(open, t)
-	}
-	sort.Slice(open, func(i, j int) bool {
-		if !open[i].DueAt.Equal(*open[j].DueAt) {
-			return open[i].DueAt.Before(*open[j].DueAt)
-		}
-		return open[i].ID < open[j].ID
-	})
+	overdue, planned, due := groupTodayTodos(s.todos, today)
 	views := []models.CheckoffView{}
 	for _, c := range s.checkoffs {
 		days := []string{}
@@ -439,7 +449,7 @@ func (s *JSONStore) GetToday() (models.TodayView, error) {
 			CheckedToday: checkedToday,
 		})
 	}
-	return models.TodayView{Date: today, DueTodos: open, Checkoffs: views}, nil
+	return models.TodayView{Date: today, OverdueTodos: overdue, PlannedTodos: planned, DueTodos: due, Checkoffs: views}, nil
 }
 
 // hasCheckoff reports whether the checkoff exists. Caller must hold s.mu.
@@ -538,6 +548,21 @@ func (s *JSONStore) UpdateCanvasTodo(id int, content string, dueAt *time.Time, c
 			s.todos[i].CanvasCourseCode = courseCode
 			s.todos[i].CanvasURL = url
 			s.todos[i].CanvasUpdatedAt = updatedAt
+			return s.save()
+		}
+	}
+	return fmt.Errorf("todo %d: %w", id, ErrNotFound)
+}
+
+func (s *JSONStore) DetachCanvasTodo(id int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.todos {
+		if s.todos[i].ID == id {
+			s.todos[i].Origin = ""
+			s.todos[i].CanvasAssignID = nil
+			s.todos[i].CanvasURL = ""
+			s.todos[i].CanvasUpdatedAt = ""
 			return s.save()
 		}
 	}

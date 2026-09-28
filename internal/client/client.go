@@ -149,6 +149,14 @@ func (c *Client) MarkTodoUndone(id int) error {
 	return c.setTodoDone(id, false)
 }
 
+func (c *Client) SetTodoWorkDate(id int, day string) error {
+	return c.do(http.MethodPut, fmt.Sprintf("/todos/%d/work-date", id), api.WorkDateBody{Date: day}, nil)
+}
+
+func (c *Client) ClearTodoWorkDate(id int) error {
+	return c.do(http.MethodDelete, fmt.Sprintf("/todos/%d/work-date", id), nil, nil)
+}
+
 func (c *Client) setTodoDone(id int, done bool) error {
 	return c.do(http.MethodPatch, fmt.Sprintf("/todos/%d", id), api.TodoPatch{Done: &done}, nil)
 }

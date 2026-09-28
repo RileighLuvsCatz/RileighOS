@@ -17,6 +17,7 @@ type Todo struct {
 	Done             bool       `json:"done"`
 	CreatedAt        time.Time  `json:"created_at"`
 	DueAt            *time.Time `json:"due_at,omitempty"`
+	WorkDate         *string    `json:"work_date,omitempty"`
 	Origin           string     `json:"origin,omitempty"`
 	CanvasAssignID   *int64     `json:"canvas_assignment_id,omitempty"`
 	CanvasCourseCode string     `json:"canvas_course_code,omitempty"`
@@ -60,13 +61,22 @@ type CheckoffView struct {
 	CheckedToday bool     `json:"checked_today"`
 }
 
-// TodayView is the answer to "what does my day look like": check-offs with
-// their streaks plus open todos due today or overdue (undated and
-// future-dated todos live in `todo list`, not here), computed as of Date.
+// TodayTodo carries one open todo and the reasons it is overdue. A todo
+// appears in exactly one TodayView section, even when both dates apply.
+type TodayTodo struct {
+	Todo
+	DueDay          string `json:"due_day,omitempty"`
+	OverdueWorkDate bool   `json:"overdue_work_date,omitempty"`
+	OverdueDueDate  bool   `json:"overdue_due_date,omitempty"`
+}
+
+// TodayView groups open todos by urgency as of the server-local Date.
 type TodayView struct {
-	Date      string         `json:"date"`
-	DueTodos  []Todo         `json:"due_todos"`
-	Checkoffs []CheckoffView `json:"checkoffs"`
+	Date         string         `json:"date"`
+	OverdueTodos []TodayTodo    `json:"overdue_todos"`
+	PlannedTodos []TodayTodo    `json:"planned_todos"`
+	DueTodos     []TodayTodo    `json:"due_todos"`
+	Checkoffs    []CheckoffView `json:"checkoffs"`
 }
 
 // CanvasCourse is one Canvas course as tracked for import gating. A course

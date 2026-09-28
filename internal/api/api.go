@@ -21,6 +21,12 @@ type TodoPatch struct {
 	Done *bool `json:"done"`
 }
 
+// WorkDateBody sets a user-controlled day to work on a todo. "today" is
+// resolved by the server so a remote client cannot pick the wrong day.
+type WorkDateBody struct {
+	Date string `json:"date"`
+}
+
 // NameBody is the POST /checkoffs request shape.
 type NameBody struct {
 	Name string `json:"name"`

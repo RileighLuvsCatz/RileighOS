@@ -29,9 +29,10 @@ rileighos checkoff list               # [x] with streak 1
 rileighos checkoff check 1 2026-09-22 # backfill yesterday → streak 2
 rileighos checkoff show 1
 
-# 3. The punchline: one call
+# 3. Plan work before the deadline, then see the whole day in one call
+rileighos todo plan 1
 rileighos today
-# check-off status, then todos due today or overdue. Server assembles it
+# overdue work/deadlines, planned work, due today, and check-offs. Server assembles it
 # (GET /today), so CLI, TUI, and future GUI all share the answer.
 
 # 4. Canvas import (the day-to-day hook, needs RILEIGHOS_CANVAS_TOKEN on server)

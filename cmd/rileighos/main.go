@@ -53,6 +53,8 @@ todo commands:
   rileighos todo list [--all|--done|--open]
   rileighos todo done <id>             mark a todo done
   rileighos todo undone <id>           mark a todo not done
+  rileighos todo plan <id> [YYYY-MM-DD] set or replace its work date (default today)
+  rileighos todo unplan <id>           clear its work date
   rileighos todo delete <id>
 
 note commands:
@@ -306,7 +308,7 @@ func openStore(backend, dbPath, jsonPath string) (store.FullStore, error) {
 
 func runTodo(s store.Store, args []string) error {
 	if len(args) == 0 {
-		return errors.New("todo needs a command: add, list, done, undone, delete")
+		return errors.New("todo needs a command: add, list, done, undone, plan, unplan, delete")
 	}
 	cmd, args := strings.ToLower(args[0]), args[1:]
 	switch cmd {
@@ -350,7 +352,7 @@ func runTodo(s store.Store, args []string) error {
 			if t.Done {
 				box = "x"
 			}
-			fmt.Printf("[%s] %d %s\n", box, t.ID, t.Content)
+			fmt.Printf("[%s] %d %s%s\n", box, t.ID, t.Content, todoDateLabels(t))
 			shown++
 		}
 		if shown == 0 {
@@ -376,6 +378,36 @@ func runTodo(s store.Store, args []string) error {
 			return friendlyNotFound(err, "todo", id)
 		}
 		fmt.Printf("todo %d marked not done\n", id)
+		return nil
+	case "plan":
+		if len(args) < 1 || len(args) > 2 {
+			return errors.New("usage: rileighos todo plan <id> [YYYY-MM-DD]")
+		}
+		id, err := needID(args[:1], "usage: rileighos todo plan <id> [YYYY-MM-DD]")
+		if err != nil {
+			return err
+		}
+		day := "today"
+		if len(args) == 2 {
+			day = args[1]
+		}
+		if day != "today" && !store.ValidDay(day) {
+			return fmt.Errorf("invalid work date %q: want YYYY-MM-DD or today", day)
+		}
+		if err := s.SetTodoWorkDate(id, day); err != nil {
+			return friendlyNotFound(err, "todo", id)
+		}
+		fmt.Printf("todo %d planned for %s\n", id, day)
+		return nil
+	case "unplan":
+		id, err := needID(args, "usage: rileighos todo unplan <id>")
+		if err != nil {
+			return err
+		}
+		if err := s.ClearTodoWorkDate(id); err != nil {
+			return friendlyNotFound(err, "todo", id)
+		}
+		fmt.Printf("todo %d work date cleared\n", id)
 		return nil
 	case "delete", "del", "rm":
 		id, err := needID(args, "usage: rileighos todo delete <id>")
@@ -657,6 +689,12 @@ func runToday(s store.Store) error {
 		return err
 	}
 	fmt.Printf("today %s\n", view.Date)
+	fmt.Println("overdue:")
+	printTodayTodos(view.OverdueTodos, view.Date)
+	fmt.Println("planned work:")
+	printTodayTodos(view.PlannedTodos, view.Date)
+	fmt.Println("due today:")
+	printTodayTodos(view.DueTodos, view.Date)
 	fmt.Println("check-offs:")
 	if len(view.Checkoffs) == 0 {
 		fmt.Println("  (none)")
@@ -669,15 +707,57 @@ func runToday(s store.Store) error {
 			fmt.Printf("  [%s] %d %s (streak %d)\n", box, c.ID, c.Name, c.Streak)
 		}
 	}
-	fmt.Println("due today:")
-	if len(view.DueTodos) == 0 {
-		fmt.Println("  (none)")
-	} else {
-		for _, t := range view.DueTodos {
-			fmt.Printf("  [ ] %d %s\n", t.ID, t.Content)
-		}
-	}
 	return nil
+}
+
+func printTodayTodos(todos []models.TodayTodo, today string) {
+	if len(todos) == 0 {
+		fmt.Println("  (none)")
+		return
+	}
+	for _, t := range todos {
+		fmt.Printf("  [ ] %d %s%s\n", t.ID, t.Content, todayDateLabels(t, today))
+	}
+}
+
+func todayDateLabels(t models.TodayTodo, today string) string {
+	labels := []string{}
+	if t.WorkDate != nil {
+		label := "work planned " + *t.WorkDate
+		if *t.WorkDate == today {
+			label = "work planned today"
+		} else if t.OverdueWorkDate {
+			label += " (overdue)"
+		}
+		labels = append(labels, label)
+	}
+	if t.DueDay != "" {
+		label := "due " + t.DueDay
+		if t.DueDay == today {
+			label = "due today"
+		} else if t.OverdueDueDate {
+			label += " (overdue)"
+		}
+		labels = append(labels, label)
+	}
+	if len(labels) == 0 {
+		return ""
+	}
+	return " (" + strings.Join(labels, "; ") + ")"
+}
+
+func todoDateLabels(t models.Todo) string {
+	labels := []string{}
+	if t.WorkDate != nil {
+		labels = append(labels, "work "+*t.WorkDate)
+	}
+	if t.DueAt != nil {
+		labels = append(labels, "due "+t.DueAt.Format(time.RFC3339))
+	}
+	if len(labels) == 0 {
+		return ""
+	}
+	return " (" + strings.Join(labels, "; ") + ")"
 }
 
 func runCanvas(s *client.Client, args []string) error {

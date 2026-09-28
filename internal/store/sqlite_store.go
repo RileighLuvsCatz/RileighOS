@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -106,6 +105,7 @@ func (s *SQLiteStore) migrate() error {
 	// every open after the first and are ignored; anything else fails.
 	adds := []string{
 		`ALTER TABLE todos ADD COLUMN due_at TEXT`,
+		`ALTER TABLE todos ADD COLUMN work_date TEXT`,
 		`ALTER TABLE todos ADD COLUMN origin TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE todos ADD COLUMN canvas_assignment_id INTEGER`,
 		`ALTER TABLE todos ADD COLUMN canvas_course_code TEXT NOT NULL DEFAULT ''`,
@@ -148,7 +148,7 @@ func (s *SQLiteStore) Close() error { return s.db.Close() }
 
 // todoColumns / noteColumns are the full column lists for reads; every
 // SELECT must use them in this order to match the scan helpers below.
-const todoColumns = `id, content, done, created_at, due_at, origin, canvas_assignment_id, canvas_course_code, canvas_url, canvas_updated_at`
+const todoColumns = `id, content, done, created_at, due_at, work_date, origin, canvas_assignment_id, canvas_course_code, canvas_url, canvas_updated_at`
 const noteColumns = `id, content, created_at, due_at, origin, canvas_assignment_id, canvas_course_code, canvas_url, canvas_updated_at`
 
 // todoScan holds the raw scan targets for one Todo row.
@@ -157,6 +157,7 @@ type todoScan struct {
 	done     int
 	created  string
 	dueAt    sql.NullString
+	workDate sql.NullString
 	assignID sql.NullInt64
 }
 
@@ -171,6 +172,10 @@ func (ts *todoScan) finish() {
 			ts.todo.DueAt = &d
 		}
 	}
+	if ts.workDate.Valid && ValidDay(ts.workDate.String) {
+		day := ts.workDate.String
+		ts.todo.WorkDate = &day
+	}
 	if ts.assignID.Valid {
 		id := ts.assignID.Int64
 		ts.todo.CanvasAssignID = &id
@@ -178,7 +183,7 @@ func (ts *todoScan) finish() {
 }
 
 func (ts *todoScan) targets() []any {
-	return []any{&ts.todo.ID, &ts.todo.Content, &ts.done, &ts.created, &ts.dueAt, &ts.todo.Origin, &ts.assignID, &ts.todo.CanvasCourseCode, &ts.todo.CanvasURL, &ts.todo.CanvasUpdatedAt}
+	return []any{&ts.todo.ID, &ts.todo.Content, &ts.done, &ts.created, &ts.dueAt, &ts.workDate, &ts.todo.Origin, &ts.assignID, &ts.todo.CanvasCourseCode, &ts.todo.CanvasURL, &ts.todo.CanvasUpdatedAt}
 }
 
 // noteScan holds the raw scan targets for one Note row.
@@ -289,6 +294,35 @@ func (s *SQLiteStore) MarkTodoDone(id int) error {
 
 func (s *SQLiteStore) MarkTodoUndone(id int) error {
 	return s.setTodoDone(id, false)
+}
+
+func (s *SQLiteStore) SetTodoWorkDate(id int, day string) error {
+	day, err := NormalizeWorkDate(day)
+	if err != nil {
+		return err
+	}
+	return s.updateTodoWorkDate(id, day)
+}
+
+func (s *SQLiteStore) ClearTodoWorkDate(id int) error {
+	return s.updateTodoWorkDate(id, nil)
+}
+
+func (s *SQLiteStore) updateTodoWorkDate(id int, day any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res, err := s.db.Exec(`UPDATE todos SET work_date = ? WHERE id = ?`, day, id)
+	if err != nil {
+		return fmt.Errorf("update todo %d work date: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update todo %d work date: %w", id, err)
+	}
+	if n == 0 {
+		return fmt.Errorf("todo %d: %w", id, ErrNotFound)
+	}
+	return nil
 }
 
 func (s *SQLiteStore) setTodoDone(id int, done bool) error {
@@ -572,29 +606,19 @@ func (s *SQLiteStore) GetToday() (models.TodayView, error) {
 		return models.TodayView{}, fmt.Errorf("today todos: %w", err)
 	}
 	defer todoRows.Close()
-	due := []models.Todo{}
+	todos := []models.Todo{}
 	for todoRows.Next() {
 		var ts todoScan
 		if err := todoRows.Scan(ts.targets()...); err != nil {
 			return models.TodayView{}, fmt.Errorf("scan today todo: %w", err)
 		}
 		ts.finish()
-		// Today shows open todos due today or overdue: undated and
-		// future-dated items live in `todo list`, not here.
-		if ts.todo.Done || ts.todo.DueAt == nil || dueDay(ts.todo.DueAt) > today {
-			continue
-		}
-		due = append(due, ts.todo)
+		todos = append(todos, ts.todo)
 	}
 	if err := todoRows.Err(); err != nil {
 		return models.TodayView{}, fmt.Errorf("today todos: %w", err)
 	}
-	sort.Slice(due, func(i, j int) bool {
-		if !due[i].DueAt.Equal(*due[j].DueAt) {
-			return due[i].DueAt.Before(*due[j].DueAt)
-		}
-		return due[i].ID < due[j].ID
-	})
+	overdue, planned, due := groupTodayTodos(todos, today)
 
 	coRows, err := s.db.Query(`SELECT id, name, created_at FROM checkoffs ORDER BY id`)
 	if err != nil {
@@ -648,7 +672,7 @@ func (s *SQLiteStore) GetToday() (models.TodayView, error) {
 			CheckedToday: checkedToday,
 		})
 	}
-	return models.TodayView{Date: today, DueTodos: due, Checkoffs: views}, nil
+	return models.TodayView{Date: today, OverdueTodos: overdue, PlannedTodos: planned, DueTodos: due, Checkoffs: views}, nil
 }
 
 // --- Canvas sync support ---
@@ -790,6 +814,23 @@ func (s *SQLiteStore) UpdateCanvasTodo(id int, content string, dueAt *time.Time,
 	n, err := res.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("update canvas todo %d: %w", id, err)
+	}
+	if n == 0 {
+		return fmt.Errorf("todo %d: %w", id, ErrNotFound)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) DetachCanvasTodo(id int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res, err := s.db.Exec(`UPDATE todos SET origin = '', canvas_assignment_id = NULL, canvas_url = '', canvas_updated_at = '' WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("detach canvas todo %d: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("detach canvas todo %d: %w", id, err)
 	}
 	if n == 0 {
 		return fmt.Errorf("todo %d: %w", id, ErrNotFound)

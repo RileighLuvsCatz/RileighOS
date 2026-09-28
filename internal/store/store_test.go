@@ -304,10 +304,10 @@ func TestTodayDueFilter(t *testing.T) {
 				t.Fatalf("want date %s, got %s", today, view.Date)
 			}
 			var got []string
-			for _, td := range view.DueTodos {
+			for _, td := range view.OverdueTodos {
 				got = append(got, td.Content)
 			}
-			want := []string{"overdue b", "overdue a", "due today"}
+			want := []string{"overdue b", "overdue a"}
 			if len(got) != len(want) {
 				t.Fatalf("want %v, got %v", want, got)
 			}
@@ -315,6 +315,9 @@ func TestTodayDueFilter(t *testing.T) {
 				if got[i] != want[i] {
 					t.Fatalf("want %v, got %v", want, got)
 				}
+			}
+			if len(view.DueTodos) != 1 || view.DueTodos[0].Content != "due today" {
+				t.Fatalf("want only due today, got %+v", view.DueTodos)
 			}
 		})
 	}

@@ -20,6 +20,8 @@ type TodoStore interface {
 	GetTodo(id int) (models.Todo, error)
 	MarkTodoDone(id int) error
 	MarkTodoUndone(id int) error
+	SetTodoWorkDate(id int, day string) error
+	ClearTodoWorkDate(id int) error
 	DeleteTodo(id int) error
 }
 
@@ -82,6 +84,7 @@ type CanvasStore interface {
 	AddCanvasTodo(content string, dueAt *time.Time, assignmentID int64, courseCode, url, updatedAt string) (models.Todo, error)
 	GetTodoByCanvasID(assignmentID int64) (models.Todo, error)
 	UpdateCanvasTodo(id int, content string, dueAt *time.Time, courseCode, url, updatedAt string) error
+	DetachCanvasTodo(id int) error
 	AddCanvasNote(content string, dueAt *time.Time, assignmentID int64, courseCode, url, updatedAt string) (models.Note, error)
 	GetNoteByCanvasID(assignmentID int64) (models.Note, error)
 	UpdateCanvasNote(id int, content string, dueAt *time.Time, courseCode, url, updatedAt string) error
