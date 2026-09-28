@@ -25,8 +25,9 @@ type Todo struct {
 }
 
 // Note is a free-form piece of text with no completion state.
-// Canvas assignments with no submittable type (`submission_types: ["none"]`
-// or empty) import as notes; they carry the same provenance fields as todos
+// Canvas assignments with no submittable type (`submission_types` of
+// "none"/"not_graded"/empty, or `grading_type: "not_graded"`) import as
+// notes; they carry the same provenance fields as todos
 // so re-syncs can update them, but Done/submission state never applies.
 type Note struct {
 	ID               int        `json:"id"`
@@ -82,8 +83,9 @@ type CanvasCourse struct {
 }
 
 // CanvasItem is one Canvas assignment mapped to local concepts, before the
-// store decides insert vs. update vs. skip. Submittable follows Canvas
-// `submission_types` (only "none"/empty means not submittable); Submitted
+// store decides insert vs. update vs. skip. Submittable is false when the
+// assignment is reference material (`submission_types` only
+// "none"/"not_graded"/empty, or `grading_type == "not_graded"`); Submitted
 // follows the submission `workflow_state` (submitted, graded, or
 // pending_review count as submitted).
 type CanvasItem struct {
