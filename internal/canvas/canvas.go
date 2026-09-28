@@ -78,6 +78,7 @@ type CanvasAssignmentInfo struct {
 	Name            string
 	Published       bool
 	SubmissionTypes []string
+	GradingType     string
 	DueAt           *time.Time
 	URL             string
 	UpdatedAt       string
@@ -135,6 +136,7 @@ type canvasAssignmentJSON struct {
 	Name            string                `json:"name"`
 	Published       bool                  `json:"published"`
 	SubmissionTypes []string              `json:"submission_types"`
+	GradingType     string                `json:"grading_type"`
 	DueAt           *canvasTime           `json:"due_at"`
 	HTMLURL         string                `json:"html_url"`
 	UpdatedAt       string                `json:"updated_at"`
@@ -153,12 +155,17 @@ func submittedState(state string) bool {
 	}
 }
 
-// submittable reports whether submission_types ask the student to submit
-// anything. Only "none" (or an empty list) imports as a note; every other
-// type — online uploads, discussions, quizzes, on-paper work — is a todo.
-func submittable(types []string) bool {
+// submittable reports whether an assignment asks the student to submit
+// anything. A "not_graded" anywhere means reference material, never work:
+// either submission_types containing only "none"/"not_graded"/empty, or a
+// grading_type of "not_graded". Every other type — online uploads,
+// discussions, quizzes, on-paper work — is a todo.
+func submittable(types []string, gradingType string) bool {
+	if gradingType == "not_graded" {
+		return false
+	}
 	for _, t := range types {
-		if t != "" && t != "none" {
+		if t != "" && t != "none" && t != "not_graded" {
 			return true
 		}
 	}
@@ -267,6 +274,7 @@ func (c *CanvasClient) GetAssignments(courseID int64) ([]CanvasAssignmentInfo, e
 				Name:            r.Name,
 				Published:       r.Published,
 				SubmissionTypes: r.SubmissionTypes,
+				GradingType:     r.GradingType,
 				URL:             r.HTMLURL,
 				UpdatedAt:       r.UpdatedAt,
 			}
@@ -301,7 +309,7 @@ func MapAssignment(course CanvasCourseInfo, a CanvasAssignmentInfo) models.Canva
 		DueAt:        a.DueAt,
 		URL:          a.URL,
 		UpdatedAt:    a.UpdatedAt,
-		Submittable:  submittable(a.SubmissionTypes),
+		Submittable:  submittable(a.SubmissionTypes, a.GradingType),
 		Submitted:    a.Submitted,
 	}
 }

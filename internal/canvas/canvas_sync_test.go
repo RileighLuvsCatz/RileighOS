@@ -54,9 +54,11 @@ func newFakeCanvas(token string) *fakeCanvas {
 				{ID: 102, Name: "Reading", Published: true, SubmissionTypes: []string{"none"}, DueAt: nil, HTMLURL: "http://canvas/102", UpdatedAt: "v1", Submission: nil},
 				{ID: 103, Name: "Draft", Published: false, SubmissionTypes: []string{"online_text_entry"}, DueAt: due("2026-10-02T23:59:00-05:00"), HTMLURL: "http://canvas/103", UpdatedAt: "v1", Submission: sub("unsubmitted")},
 				{ID: 104, Name: "Old quiz", Published: true, SubmissionTypes: []string{"online_quiz"}, DueAt: due("2026-08-01T23:59:00-05:00"), HTMLURL: "http://canvas/104", UpdatedAt: "v1", Submission: sub("submitted")},
+				{ID: 105, Name: "Week 1. Read & Watch", Published: true, SubmissionTypes: []string{"not_graded"}, DueAt: nil, HTMLURL: "http://canvas/105", UpdatedAt: "v1", Submission: nil},
 			},
 			2: {
 				{ID: 201, Name: "Lab 3", Published: true, SubmissionTypes: []string{"online_upload"}, DueAt: due("2026-10-03T23:59:00-05:00"), HTMLURL: "http://canvas/201", UpdatedAt: "v1", Submission: sub("unsubmitted")},
+				{ID: 202, Name: "Syllabus", Published: true, SubmissionTypes: []string{"online_text_entry"}, GradingType: "not_graded", DueAt: nil, HTMLURL: "http://canvas/202", UpdatedAt: "v1", Submission: nil},
 			},
 		},
 	}
@@ -166,6 +168,19 @@ func (f *fakeCanvas) setTypes(courseID, assignID int64, types []string) {
 	panic(fmt.Sprintf("no assignment %d in course %d", assignID, courseID))
 }
 
+// setGradingType flips grading_type between syncs (professor edits).
+func (f *fakeCanvas) setGradingType(courseID, assignID int64, gradingType string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i, a := range f.assignments[courseID] {
+		if a.ID == assignID {
+			f.assignments[courseID][i].GradingType = gradingType
+			return
+		}
+	}
+	panic(fmt.Sprintf("no assignment %d in course %d", assignID, courseID))
+}
+
 // openCanvasTestStores mirrors the store package's conformance setup: every
 // sync test below runs against both backends through store.FullStore.
 func openCanvasTestStores(t *testing.T) map[string]func(t *testing.T) store.FullStore {
@@ -209,9 +224,9 @@ func TestCanvasSyncImport(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			// Essay + Lab todos, Reading note; Draft unpublished and Old
-			// quiz already-submitted are skipped.
-			if res.Imported != 3 || res.Skipped != 2 || len(res.PendingCourses) != 0 {
+			// Essay + Lab todos, Reading + Week 1 + Syllabus notes; Draft
+			// unpublished and Old quiz already-submitted are skipped.
+			if res.Imported != 5 || res.Skipped != 2 || len(res.PendingCourses) != 0 {
 				t.Fatalf("unexpected result: %+v", res)
 			}
 			essay, err := s.GetTodoByCanvasID(101)
@@ -226,6 +241,16 @@ func TestCanvasSyncImport(t *testing.T) {
 			}
 			if _, err := s.GetNoteByCanvasID(102); err != nil {
 				t.Fatalf("none-type must import as note: %v", err)
+			}
+			if note, err := s.GetNoteByCanvasID(105); err != nil {
+				t.Fatalf("not_graded submission_types must import as note: %v", err)
+			} else if note.Content != "[ART 150] Week 1. Read & Watch" || note.CanvasCourseCode != "ART 150" {
+				t.Fatalf("bad not_graded mapping: %+v", note)
+			}
+			if note, err := s.GetNoteByCanvasID(202); err != nil {
+				t.Fatalf("not_graded grading_type must import as note: %v", err)
+			} else if note.Content != "[COMP SCI 337] Syllabus" || note.CanvasCourseCode != "COMP SCI 337" {
+				t.Fatalf("bad grading_type mapping: %+v", note)
 			}
 			if _, err := s.GetTodoByCanvasID(104); !errors.Is(err, store.ErrNotFound) {
 				t.Fatalf("already-submitted new items must skip, got %v", err)
@@ -340,7 +365,7 @@ func TestCanvasSyncGating(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if res.Imported != 1 || len(res.PendingCourses) != 0 {
+			if res.Imported != 2 || len(res.PendingCourses) != 0 {
 				t.Fatalf("want only COMP imported: %+v", res)
 			}
 			if _, err := s.GetTodoByCanvasID(101); !errors.Is(err, store.ErrNotFound) {
@@ -363,7 +388,7 @@ func TestCanvasSyncGating(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if res.Imported != 2 { // Essay todo + Reading note (Draft unpublished, Old quiz submitted)
+			if res.Imported != 3 { // Essay todo + Reading + Week 1 notes (Draft unpublished, Old quiz submitted)
 				t.Fatalf("want 2 imported on include, got %+v", res)
 			}
 		})
@@ -387,6 +412,23 @@ func TestCanvasSyncTypeMigration(t *testing.T) {
 			if _, err := s.GetTodoByCanvasID(102); err != nil {
 				t.Fatalf("migrated todo must exist: %v", err)
 			}
+			// Flipping a todo to not_graded migrates it back to a note,
+			// preserving content and course code.
+			fake.setTypes(1, 101, []string{"not_graded"})
+			fake.setGradingType(1, 101, "not_graded")
+			if _, err := RunCanvasSync(s, cv, models.SyncModeManual, includeAll()); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.GetTodoByCanvasID(101); !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("migrated todo must be gone: %v", err)
+			}
+			note, err := s.GetNoteByCanvasID(101)
+			if err != nil {
+				t.Fatalf("migrated note must exist: %v", err)
+			}
+			if note.Content != "[ART 150] Essay" || note.CanvasCourseCode != "ART 150" {
+				t.Fatalf("migration must preserve content/course: %+v", note)
+			}
 		})
 	}
 }
@@ -396,20 +438,24 @@ func TestMapAssignment(t *testing.T) {
 	cases := []struct {
 		name        string
 		types       []string
+		grading     string
 		state       string
 		submittable bool
 		submitted   bool
 	}{
-		{"online work unsubmitted", []string{"online_text_entry"}, "unsubmitted", true, false},
-		{"no submission type", []string{"none"}, "unsubmitted", false, false},
-		{"empty types", nil, "unsubmitted", false, false},
-		{"submitted", []string{"online_quiz"}, "submitted", true, true},
-		{"graded", []string{"online_quiz"}, "graded", true, true},
-		{"pending review", []string{"online_upload"}, "pending_review", true, true},
+		{"online work unsubmitted", []string{"online_text_entry"}, "", "unsubmitted", true, false},
+		{"no submission type", []string{"none"}, "", "unsubmitted", false, false},
+		{"empty types", nil, "", "unsubmitted", false, false},
+		{"not_graded submission type", []string{"not_graded"}, "", "unsubmitted", false, false},
+		{"not_graded grading type", []string{"online_text_entry"}, "not_graded", "unsubmitted", false, false},
+		{"not_graded grading type empty types", nil, "not_graded", "unsubmitted", false, false},
+		{"submitted", []string{"online_quiz"}, "", "submitted", true, true},
+		{"graded", []string{"online_quiz"}, "", "graded", true, true},
+		{"pending review", []string{"online_upload"}, "", "pending_review", true, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			a := CanvasAssignmentInfo{ID: 1, Name: "X", SubmissionTypes: tc.types, Submitted: submittedState(tc.state)}
+			a := CanvasAssignmentInfo{ID: 1, Name: "X", SubmissionTypes: tc.types, GradingType: tc.grading, Submitted: submittedState(tc.state)}
 			item := MapAssignment(course, a)
 			if item.Submittable != tc.submittable || item.Submitted != tc.submitted {
 				t.Fatalf("got submittable=%v submitted=%v, want %v %v",
@@ -485,8 +531,8 @@ func TestCanvasSyncAuto(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if res.Imported != 3 || len(res.PendingCourses) != 2 {
-				t.Fatalf("want 3 imported 2 pending, got %+v", res)
+			if res.Imported != 5 || len(res.PendingCourses) != 2 {
+				t.Fatalf("want 5 imported 2 pending, got %+v", res)
 			}
 			if _, err := s.GetTodoByCanvasID(101); err != nil {
 				t.Fatalf("auto must import: %v", err)
@@ -524,8 +570,8 @@ func TestCanvasSyncDetachOnExclude(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if res.DetachedTodos != 1 || res.DetachedNotes != 1 {
-				t.Fatalf("want 1 todo + 1 note detached, got %+v", res)
+			if res.DetachedTodos != 1 || res.DetachedNotes != 2 {
+				t.Fatalf("want 1 todo + 2 notes detached, got %+v", res)
 			}
 			todos, err := s.GetTodos()
 			if err != nil {
