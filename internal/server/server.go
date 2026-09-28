@@ -48,6 +48,11 @@ import (
 //	                       pending (manual) or import flagged pending (auto)
 //	GET    /canvas/status  sync probe: {"configured": bool, "last_sync_at": ...},
 //	                       never imports, never 501s
+//	POST   /canvas/dismiss tombstone one assignment, body
+//	                       {"assignment_id": 123}: deletes the local
+//	                       todo/note if present so it never re-imports
+//	POST   /canvas/undismiss remove one tombstone, same body shape; the
+//	                       next sync re-imports (no import happens here)
 //
 // Canvas routes need RILEIGHOS_CANVAS_TOKEN (and optionally
 // RILEIGHOS_CANVAS_BASE_URL, defaulting to uwmil.instructure.com). Without
@@ -85,6 +90,8 @@ func NewServer(store store.FullStore) *Server {
 	s.mux.HandleFunc("/canvas/courses/", s.handleCanvasCourseByID)
 	s.mux.HandleFunc("/canvas/sync", s.handleCanvasSync)
 	s.mux.HandleFunc("/canvas/status", s.handleCanvasStatus)
+	s.mux.HandleFunc("/canvas/dismiss", s.handleCanvasDismiss)
+	s.mux.HandleFunc("/canvas/undismiss", s.handleCanvasUndismiss)
 	return s
 }
 
@@ -679,4 +686,76 @@ func (s *Server) handleCanvasStatus(w http.ResponseWriter, r *http.Request) {
 		status.LastSyncAt = &last
 	}
 	writeJSON(w, http.StatusOK, status)
+}
+
+// decodeDismiss parses a {"assignment_id": N} body, requiring a positive ID.
+func decodeDismiss(w http.ResponseWriter, r *http.Request) (int64, bool) {
+	r.Body = http.MaxBytesReader(nil, r.Body, 1<<20)
+	var b api.DismissRequest
+	if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body: %s", err)
+		return 0, false
+	}
+	if b.AssignmentID <= 0 {
+		writeError(w, http.StatusBadRequest, "invalid assignment id %d: must be a positive number", b.AssignmentID)
+		return 0, false
+	}
+	return b.AssignmentID, true
+}
+
+// handleCanvasDismiss serves POST /canvas/dismiss: delete the local
+// todo/note for one assignment ID if present, then tombstone the ID so
+// sync skips it forever (counted as Skipped). Dismissing an unknown ID is
+// allowed — the tombstone lands first and the import never happens.
+func (s *Server) handleCanvasDismiss(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w, r, http.MethodPost)
+		return
+	}
+	id, ok := decodeDismiss(w, r)
+	if !ok {
+		return
+	}
+	if t, err := s.store.GetTodoByCanvasID(id); err == nil {
+		if err := s.store.DeleteTodo(t.ID); err != nil {
+			writeStoreError(w, err)
+			return
+		}
+	} else if !errors.Is(err, store.ErrNotFound) {
+		writeStoreError(w, err)
+		return
+	}
+	if n, err := s.store.GetNoteByCanvasID(id); err == nil {
+		if err := s.store.DeleteNote(n.ID); err != nil {
+			writeStoreError(w, err)
+			return
+		}
+	} else if !errors.Is(err, store.ErrNotFound) {
+		writeStoreError(w, err)
+		return
+	}
+	if err := s.store.DismissCanvasAssignment(id); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, api.DismissResult{AssignmentID: id, Dismissed: true})
+}
+
+// handleCanvasUndismiss serves POST /canvas/undismiss: remove one
+// tombstone. Undismissing a non-dismissed ID is a silent no-op that still
+// succeeds; no import happens here — the next sync re-imports.
+func (s *Server) handleCanvasUndismiss(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w, r, http.MethodPost)
+		return
+	}
+	id, ok := decodeDismiss(w, r)
+	if !ok {
+		return
+	}
+	if err := s.store.UndismissCanvasAssignment(id); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, api.DismissResult{AssignmentID: id, Dismissed: false})
 }

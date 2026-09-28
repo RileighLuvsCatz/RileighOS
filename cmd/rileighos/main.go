@@ -78,6 +78,12 @@ canvas commands (needs RILEIGHOS_CANVAS_TOKEN on the server):
   rileighos canvas courses             list tracked courses and gating state
   rileighos canvas exclude <code|id>   never import a course
   rileighos canvas include <code|id>   import a course (clears pending)
+  rileighos canvas dismiss <todo-id|assignment-id> [...]
+                                       never show an assignment again
+                                       (deletes the local copy, tombstones
+                                       the Canvas ID so sync skips it)
+  rileighos canvas undismiss <assignment-id>
+                                       reverse a dismiss (next sync re-imports)
 `
 
 // version is stamped at release time via:
@@ -674,9 +680,9 @@ func runToday(s store.Store) error {
 	return nil
 }
 
-func runCanvas(s client.CanvasSyncer, args []string) error {
+func runCanvas(s *client.Client, args []string) error {
 	if len(args) == 0 {
-		return errors.New("canvas needs a command: sync, courses, exclude, include")
+		return errors.New("canvas needs a command: sync, courses, exclude, include, dismiss, undismiss")
 	}
 	cmd, args := strings.ToLower(args[0]), args[1:]
 	switch cmd {
@@ -700,8 +706,18 @@ func runCanvas(s client.CanvasSyncer, args []string) error {
 			return errors.New("usage: rileighos canvas include <code|id>")
 		}
 		return runCanvasResolve(s, args[0], false)
+	case "dismiss", "hide":
+		if len(args) == 0 {
+			return errors.New("usage: rileighos canvas dismiss <todo-id|assignment-id> [...]")
+		}
+		return runCanvasDismiss(s, args)
+	case "undismiss", "unhide", "show":
+		if len(args) != 1 {
+			return errors.New("usage: rileighos canvas undismiss <assignment-id>")
+		}
+		return runCanvasUndismiss(s, args[0])
 	default:
-		return fmt.Errorf("unknown canvas command %q (want sync, courses, exclude, include)", cmd)
+		return fmt.Errorf("unknown canvas command %q (want sync, courses, exclude, include, dismiss, undismiss)", cmd)
 	}
 }
 
@@ -814,5 +830,59 @@ func runCanvasResolve(s client.CanvasSyncer, arg string, excluded bool) error {
 	if res.DetachedTodos+res.DetachedNotes > 0 {
 		fmt.Printf("detached %d todos, %d notes to local\n", res.DetachedTodos, res.DetachedNotes)
 	}
+	return nil
+}
+
+// resolveDismissID maps one dismiss argument to a Canvas assignment ID:
+// a local todo/note ID whose item carries a Canvas assignment ID resolves
+// to that assignment; anything else must itself be a raw Canvas assignment
+// ID. Local items without Canvas provenance cannot be dismissed.
+func resolveDismissID(s *client.Client, arg string) (int64, error) {
+	id, err := strconv.ParseInt(arg, 10, 64)
+	if err != nil || id <= 0 {
+		return 0, fmt.Errorf("invalid id %q: must be a positive number", arg)
+	}
+	if t, err := s.GetTodo(int(id)); err == nil {
+		if t.CanvasAssignID == nil {
+			return 0, fmt.Errorf("todo %d is not a Canvas item (nothing to dismiss)", id)
+		}
+		return *t.CanvasAssignID, nil
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return 0, err
+	}
+	if n, err := s.GetNote(int(id)); err == nil {
+		if n.CanvasAssignID == nil {
+			return 0, fmt.Errorf("note %d is not a Canvas item (nothing to dismiss)", id)
+		}
+		return *n.CanvasAssignID, nil
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return 0, err
+	}
+	return id, nil
+}
+
+func runCanvasDismiss(s *client.Client, args []string) error {
+	for _, arg := range args {
+		assignmentID, err := resolveDismissID(s, arg)
+		if err != nil {
+			return err
+		}
+		if _, err := s.DismissCanvasAssignment(assignmentID); err != nil {
+			return err
+		}
+		fmt.Printf("dismissed assignment %d (never imports again; undismiss to reverse)\n", assignmentID)
+	}
+	return nil
+}
+
+func runCanvasUndismiss(s *client.Client, arg string) error {
+	id, err := strconv.ParseInt(arg, 10, 64)
+	if err != nil || id <= 0 {
+		return fmt.Errorf("invalid id %q: must be a positive number", arg)
+	}
+	if _, err := s.UndismissCanvasAssignment(id); err != nil {
+		return err
+	}
+	fmt.Printf("undismissed assignment %d (next sync re-imports)\n", id)
 	return nil
 }

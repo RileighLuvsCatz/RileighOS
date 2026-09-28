@@ -68,6 +68,17 @@ type CanvasStore interface {
 	// course just stops importing. Re-including the course later re-imports
 	// its assignments as new items, so detachment is one-way by design.
 	DetachCanvasCourse(courseID int64) (todos, notes int, err error)
+	// DismissCanvasAssignment tombstones one Canvas assignment ID so sync
+	// skips it forever, even when no local copy exists. Dismissing an
+	// unknown-never-seen ID is allowed (tombstone first, import never
+	// happens).
+	DismissCanvasAssignment(id int64) error
+	// UndismissCanvasAssignment removes a dismiss tombstone. Undismissing
+	// a non-dismissed ID is a silent no-op that still succeeds; it does
+	// not re-import by itself — the next sync does.
+	UndismissCanvasAssignment(id int64) error
+	// IsCanvasDismissed reports whether an assignment ID is tombstoned.
+	IsCanvasDismissed(id int64) (bool, error)
 	AddCanvasTodo(content string, dueAt *time.Time, assignmentID int64, courseCode, url, updatedAt string) (models.Todo, error)
 	GetTodoByCanvasID(assignmentID int64) (models.Todo, error)
 	UpdateCanvasTodo(id int, content string, dueAt *time.Time, courseCode, url, updatedAt string) error
