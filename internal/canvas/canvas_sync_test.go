@@ -604,6 +604,103 @@ func TestCanvasSyncDetachOnExclude(t *testing.T) {
 	}
 }
 
+// TestCanvasSyncDismiss proves the dismiss scalpel: dismiss mid-flow,
+// delete the local copies, and re-syncs never re-import (counted as
+// Skipped); undismiss lets the next sync re-import.
+func TestCanvasSyncDismiss(t *testing.T) {
+	for backend, open := range openCanvasTestStores(t) {
+		t.Run(backend, func(t *testing.T) {
+			s, cv, _ := setupSyncTest(t, backend, open)
+			if _, err := RunCanvasSync(s, cv, models.SyncModeManual, includeAll()); err != nil {
+				t.Fatal(err)
+			}
+			essay, err := s.GetTodoByCanvasID(101)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reading, err := s.GetNoteByCanvasID(102)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// Dismiss both, deleting the local copies like the CLI does.
+			if err := s.DismissCanvasAssignment(101); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.DeleteTodo(essay.ID); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.DismissCanvasAssignment(102); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.DeleteNote(reading.ID); err != nil {
+				t.Fatal(err)
+			}
+
+			res, err := RunCanvasSync(s, cv, models.SyncModeManual, includeAll())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Imported != 0 {
+				t.Fatalf("dismissed items must not re-import, got %+v", res)
+			}
+			if _, err := s.GetTodoByCanvasID(101); !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("dismissed todo must stay gone, got %v", err)
+			}
+			if _, err := s.GetNoteByCanvasID(102); !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("dismissed note must stay gone, got %v", err)
+			}
+			// Non-dismissed items still sync (COMP SCI lab untouched).
+			if _, err := s.GetTodoByCanvasID(201); err != nil {
+				t.Fatalf("non-dismissed item must survive: %v", err)
+			}
+
+			// Undismiss re-imports on the next sync.
+			if err := s.UndismissCanvasAssignment(101); err != nil {
+				t.Fatal(err)
+			}
+			res, err = RunCanvasSync(s, cv, models.SyncModeManual, includeAll())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Imported != 1 {
+				t.Fatalf("want 1 re-imported after undismiss, got %+v", res)
+			}
+			if _, err := s.GetTodoByCanvasID(101); err != nil {
+				t.Fatalf("undismissed todo must re-import: %v", err)
+			}
+			// 102 stays dismissed.
+			if _, err := s.GetNoteByCanvasID(102); !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("still-dismissed note must stay gone, got %v", err)
+			}
+		})
+	}
+}
+
+// TestCanvasSyncDismissBeforeImport proves tombstone-first works:
+// dismissing a never-seen ID prevents the import from ever happening.
+func TestCanvasSyncDismissBeforeImport(t *testing.T) {
+	for backend, open := range openCanvasTestStores(t) {
+		t.Run(backend, func(t *testing.T) {
+			s, cv, _ := setupSyncTest(t, backend, open)
+			if err := s.DismissCanvasAssignment(101); err != nil {
+				t.Fatal(err)
+			}
+			res, err := RunCanvasSync(s, cv, models.SyncModeManual, includeAll())
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Essay never imports; Reading note + Lab todo do.
+			if res.Imported != 2 {
+				t.Fatalf("want 2 imported with 101 dismissed, got %+v", res)
+			}
+			if _, err := s.GetTodoByCanvasID(101); !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("pre-dismissed todo must never import, got %v", err)
+			}
+		})
+	}
+}
+
 func TestSyncStale(t *testing.T) {
 	now := time.Now()
 	if !SyncStale(time.Time{}, now, time.Minute) {

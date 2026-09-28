@@ -87,6 +87,14 @@ func (s *SQLiteStore) migrate() error {
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL
 		)`,
+		// Dismiss tombstones: one row per never-show-again Canvas
+		// assignment ID. Sync checks this first and skips dismissed IDs
+		// (counted as Skipped), so a deleted local copy is never
+		// re-imported. Tombstones survive deletes and re-syncs; only
+		// undismiss removes them.
+		`CREATE TABLE IF NOT EXISTS canvas_dismissed (
+			assignment_id INTEGER PRIMARY KEY
+		)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -921,4 +929,36 @@ func (s *SQLiteStore) DetachCanvasCourse(courseID int64) (int, int, error) {
 		return 0, 0, err
 	}
 	return todos, notes, nil
+}
+
+// DismissCanvasAssignment tombstones one assignment ID. Any ID is allowed,
+// including never-seen ones; re-dismissing is a no-op.
+func (s *SQLiteStore) DismissCanvasAssignment(id int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.db.Exec(`INSERT OR IGNORE INTO canvas_dismissed (assignment_id) VALUES (?)`, id); err != nil {
+		return fmt.Errorf("dismiss canvas assignment %d: %w", id, err)
+	}
+	return nil
+}
+
+// UndismissCanvasAssignment removes a tombstone. Removing a non-dismissed
+// ID is a silent no-op that still succeeds.
+func (s *SQLiteStore) UndismissCanvasAssignment(id int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.db.Exec(`DELETE FROM canvas_dismissed WHERE assignment_id = ?`, id); err != nil {
+		return fmt.Errorf("undismiss canvas assignment %d: %w", id, err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) IsCanvasDismissed(id int64) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM canvas_dismissed WHERE assignment_id = ?`, id).Scan(&n); err != nil {
+		return false, fmt.Errorf("check dismissed canvas assignment %d: %w", id, err)
+	}
+	return n > 0, nil
 }

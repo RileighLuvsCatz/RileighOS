@@ -102,7 +102,17 @@ func RunCanvasSync(s store.FullStore, cv *CanvasClient, mode models.SyncMode, de
 
 // importItem routes one mapped assignment to the note or todo path,
 // migrating across types when a professor flips submission_types.
+// Dismissed assignment IDs are skipped first (counted as Skipped) and
+// never import, even when no local copy exists.
 func importItem(s store.FullStore, item models.CanvasItem, res *models.SyncResult) error {
+	dismissed, err := s.IsCanvasDismissed(item.AssignmentID)
+	if err != nil {
+		return err
+	}
+	if dismissed {
+		res.Skipped++
+		return nil
+	}
 	todo, todoErr := s.GetTodoByCanvasID(item.AssignmentID)
 	if todoErr != nil && !errors.Is(todoErr, store.ErrNotFound) {
 		return todoErr

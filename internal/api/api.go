@@ -47,3 +47,16 @@ type SyncRequest struct {
 	Mode      string          `json:"mode"`
 	Decisions map[string]bool `json:"decisions"`
 }
+
+// DismissRequest is the POST /canvas/dismiss and POST /canvas/undismiss
+// request shape: the Canvas assignment ID to tombstone or revive.
+type DismissRequest struct {
+	AssignmentID int64 `json:"assignment_id"`
+}
+
+// DismissResult is the dismiss/undismiss response: the assignment ID plus
+// whether a tombstone remains (false after undismiss).
+type DismissResult struct {
+	AssignmentID int64 `json:"assignment_id"`
+	Dismissed    bool  `json:"dismissed"`
+}

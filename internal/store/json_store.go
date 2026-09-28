@@ -15,15 +15,16 @@ import (
 // jsonFile is the on-disk shape of the JSON backend: both collections
 // plus the next IDs, so IDs stay unique across restarts.
 type jsonFile struct {
-	Todos          []models.Todo         `json:"todos"`
-	Notes          []models.Note         `json:"notes"`
-	Checkoffs      []models.Checkoff     `json:"checkoffs"`
-	CheckoffDays   []CheckoffDay         `json:"checkoff_days"`
-	CanvasCourses  []models.CanvasCourse `json:"canvas_courses"`
-	CanvasLastSync string                `json:"canvas_last_sync"`
-	NextTodoID     int                   `json:"next_todo_id"`
-	NextNoteID     int                   `json:"next_note_id"`
-	NextCheckoffID int                   `json:"next_checkoff_id"`
+	Todos           []models.Todo         `json:"todos"`
+	Notes           []models.Note         `json:"notes"`
+	Checkoffs       []models.Checkoff     `json:"checkoffs"`
+	CheckoffDays    []CheckoffDay         `json:"checkoff_days"`
+	CanvasCourses   []models.CanvasCourse `json:"canvas_courses"`
+	CanvasLastSync  string                `json:"canvas_last_sync"`
+	CanvasDismissed []int64               `json:"canvas_dismissed"`
+	NextTodoID      int                   `json:"next_todo_id"`
+	NextNoteID      int                   `json:"next_note_id"`
+	NextCheckoffID  int                   `json:"next_checkoff_id"`
 }
 
 // CheckoffDay is one checked day for one checkoff. Days live as a flat
@@ -38,17 +39,18 @@ type CheckoffDay struct {
 // It exists as the Phase 1 starting point: dead simple, human-readable,
 // and enough until querying/filtering starts to strain.
 type JSONStore struct {
-	mu             sync.Mutex
-	path           string
-	todos          []models.Todo
-	notes          []models.Note
-	checkoffs      []models.Checkoff
-	days           []CheckoffDay
-	canvasCourses  []models.CanvasCourse
-	canvasLastSync string
-	nextTodoID     int
-	nextNoteID     int
-	nextCheckoffID int
+	mu              sync.Mutex
+	path            string
+	todos           []models.Todo
+	notes           []models.Note
+	checkoffs       []models.Checkoff
+	days            []CheckoffDay
+	canvasCourses   []models.CanvasCourse
+	canvasLastSync  string
+	canvasDismissed map[int64]bool
+	nextTodoID      int
+	nextNoteID      int
+	nextCheckoffID  int
 }
 
 // Compile-time check that JSONStore satisfies Store.
@@ -59,9 +61,12 @@ var _ FullStore = (*JSONStore)(nil)
 
 // OpenJSONStore loads (or creates) the JSON file at path.
 func OpenJSONStore(path string) (*JSONStore, error) {
-	s := &JSONStore{path: path, nextTodoID: 1, nextNoteID: 1, nextCheckoffID: 1}
+	s := &JSONStore{path: path, nextTodoID: 1, nextNoteID: 1, nextCheckoffID: 1, canvasDismissed: map[int64]bool{}}
 	if err := s.load(); err != nil {
 		return nil, err
+	}
+	if s.canvasDismissed == nil {
+		s.canvasDismissed = map[int64]bool{}
 	}
 	return s, nil
 }
@@ -87,6 +92,10 @@ func (s *JSONStore) load() error {
 	s.days = f.CheckoffDays
 	s.canvasCourses = f.CanvasCourses
 	s.canvasLastSync = f.CanvasLastSync
+	s.canvasDismissed = map[int64]bool{}
+	for _, id := range f.CanvasDismissed {
+		s.canvasDismissed[id] = true
+	}
 	s.nextTodoID = max(f.NextTodoID, 1)
 	s.nextNoteID = max(f.NextNoteID, 1)
 	s.nextCheckoffID = max(f.NextCheckoffID, 1)
@@ -120,16 +129,22 @@ func (s *JSONStore) load() error {
 
 // save writes the full state atomically. Caller must hold s.mu.
 func (s *JSONStore) save() error {
+	dismissed := make([]int64, 0, len(s.canvasDismissed))
+	for id := range s.canvasDismissed {
+		dismissed = append(dismissed, id)
+	}
+	sort.Slice(dismissed, func(i, j int) bool { return dismissed[i] < dismissed[j] })
 	f := jsonFile{
-		Todos:          s.todos,
-		Notes:          s.notes,
-		Checkoffs:      s.checkoffs,
-		CheckoffDays:   s.days,
-		CanvasCourses:  s.canvasCourses,
-		CanvasLastSync: s.canvasLastSync,
-		NextTodoID:     s.nextTodoID,
-		NextNoteID:     s.nextNoteID,
-		NextCheckoffID: s.nextCheckoffID,
+		Todos:           s.todos,
+		Notes:           s.notes,
+		Checkoffs:       s.checkoffs,
+		CheckoffDays:    s.days,
+		CanvasCourses:   s.canvasCourses,
+		CanvasLastSync:  s.canvasLastSync,
+		CanvasDismissed: dismissed,
+		NextTodoID:      s.nextTodoID,
+		NextNoteID:      s.nextNoteID,
+		NextCheckoffID:  s.nextCheckoffID,
 	}
 	data, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
@@ -630,4 +645,37 @@ func (s *JSONStore) DetachCanvasCourse(courseID int64) (int, int, error) {
 		}
 	}
 	return todos, notes, s.save()
+}
+
+func (s *JSONStore) DismissCanvasAssignment(id int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.canvasDismissed == nil {
+		s.canvasDismissed = map[int64]bool{}
+	}
+	if s.canvasDismissed[id] {
+		return nil
+	}
+	s.canvasDismissed[id] = true
+	return s.save()
+}
+
+func (s *JSONStore) UndismissCanvasAssignment(id int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.canvasDismissed == nil {
+		s.canvasDismissed = map[int64]bool{}
+		return nil
+	}
+	if !s.canvasDismissed[id] {
+		return nil
+	}
+	delete(s.canvasDismissed, id)
+	return s.save()
+}
+
+func (s *JSONStore) IsCanvasDismissed(id int64) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.canvasDismissed[id], nil
 }

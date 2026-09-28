@@ -40,6 +40,8 @@ type CanvasSyncer interface {
 	GetCanvasStatus() (models.CanvasStatus, error)
 	SyncCanvas(models.SyncMode, models.SyncDecisions) (models.SyncResult, error)
 	ResolveCanvasCourse(int64, bool) (models.CourseResolveResult, error)
+	DismissCanvasAssignment(int64) (api.DismissResult, error)
+	UndismissCanvasAssignment(int64) (api.DismissResult, error)
 }
 
 // Compile-time check that Client satisfies CanvasSyncer.
@@ -289,6 +291,26 @@ func (c *Client) ResolveCanvasCourse(courseID int64, excluded bool) (models.Cour
 	var res models.CourseResolveResult
 	if err := c.do(http.MethodPatch, fmt.Sprintf("/canvas/courses/%d", courseID), api.CourseResolve{Excluded: &excluded}, &res); err != nil {
 		return models.CourseResolveResult{}, err
+	}
+	return res, nil
+}
+
+// DismissCanvasAssignment deletes the local todo/note for one assignment
+// ID if present and tombstones the ID so sync skips it forever.
+func (c *Client) DismissCanvasAssignment(assignmentID int64) (api.DismissResult, error) {
+	var res api.DismissResult
+	if err := c.do(http.MethodPost, "/canvas/dismiss", api.DismissRequest{AssignmentID: assignmentID}, &res); err != nil {
+		return api.DismissResult{}, err
+	}
+	return res, nil
+}
+
+// UndismissCanvasAssignment removes one dismiss tombstone. The next sync
+// re-imports; nothing imports here.
+func (c *Client) UndismissCanvasAssignment(assignmentID int64) (api.DismissResult, error) {
+	var res api.DismissResult
+	if err := c.do(http.MethodPost, "/canvas/undismiss", api.DismissRequest{AssignmentID: assignmentID}, &res); err != nil {
+		return api.DismissResult{}, err
 	}
 	return res, nil
 }

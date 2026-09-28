@@ -342,3 +342,123 @@ func TestCanvasSyncBadMode(t *testing.T) {
 	}
 	assertNoLeak(t, data)
 }
+
+// TestCanvasDismissAPI runs the full dismiss loop over HTTP: import,
+// dismiss (deletes the local copy + tombstones), re-sync stays gone,
+// undismiss + sync re-imports. Dismiss needs no Canvas token.
+func TestCanvasDismissAPI(t *testing.T) {
+	for _, backend := range testBackends {
+		t.Run(backend, func(t *testing.T) {
+			fake := &apiTestFake{token: canvasTestSecret}
+			withCanvasEnv(t, fake.serve(t))
+			base := openTestServer(t, backend)
+			c := client.NewClient(base)
+			defer c.Close()
+
+			if status, _ := doRaw(t, http.MethodPost, base+"/canvas/sync", `{"decisions":{"1":false,"2":false}}`); status != http.StatusOK {
+				t.Fatalf("POST sync: want 200, got %d", status)
+			}
+			todos, err := c.GetTodos()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var essayID int
+			for _, td := range todos {
+				if td.CanvasAssignID != nil && *td.CanvasAssignID == 101 {
+					essayID = td.ID
+				}
+			}
+			if essayID == 0 {
+				t.Fatalf("want imported essay todo, got %+v", todos)
+			}
+
+			// Dismiss by raw assignment ID: deletes + tombstones.
+			status, data := doRaw(t, http.MethodPost, base+"/canvas/dismiss", `{"assignment_id":101}`)
+			if status != http.StatusOK {
+				t.Fatalf("POST dismiss: want 200, got %d (%s)", status, data)
+			}
+			if got := decodeBody[api.DismissResult](t, data); got.AssignmentID != 101 || !got.Dismissed {
+				t.Fatalf("want dismissed 101, got %+v", got)
+			}
+			after, err := c.GetTodos()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, td := range after {
+				if td.CanvasAssignID != nil && *td.CanvasAssignID == 101 {
+					t.Fatalf("dismiss must delete the local copy: %+v", after)
+				}
+			}
+
+			// Re-sync: stays gone.
+			status, data = doRaw(t, http.MethodPost, base+"/canvas/sync", `{"decisions":{"1":false,"2":false}}`)
+			if status != http.StatusOK {
+				t.Fatalf("POST re-sync: want 200, got %d (%s)", status, data)
+			}
+			if res := decodeBody[models.SyncResult](t, data); res.Imported != 0 {
+				t.Fatalf("dismissed must not re-import, got %+v", res)
+			}
+
+			// Dismiss of a never-seen ID is allowed (tombstone first).
+			if status, _ := doRaw(t, http.MethodPost, base+"/canvas/dismiss", `{"assignment_id":999}`); status != http.StatusOK {
+				t.Fatalf("POST dismiss unknown: want 200, got %d", status)
+			}
+
+			// Undismiss a still-dismissed ID, then sync re-imports.
+			// Undismissing a non-dismissed ID is a silent no-op (200).
+			if status, _ := doRaw(t, http.MethodPost, base+"/canvas/undismiss", `{"assignment_id":12345}`); status != http.StatusOK {
+				t.Fatalf("POST undismiss unknown: want 200, got %d", status)
+			}
+			status, data = doRaw(t, http.MethodPost, base+"/canvas/undismiss", `{"assignment_id":101}`)
+			if status != http.StatusOK {
+				t.Fatalf("POST undismiss: want 200, got %d (%s)", status, data)
+			}
+			if got := decodeBody[api.DismissResult](t, data); got.AssignmentID != 101 || got.Dismissed {
+				t.Fatalf("want undismissed 101, got %+v", got)
+			}
+			status, data = doRaw(t, http.MethodPost, base+"/canvas/sync", `{"decisions":{"1":false,"2":false}}`)
+			if status != http.StatusOK {
+				t.Fatalf("POST sync after undismiss: want 200, got %d (%s)", status, data)
+			}
+			if res := decodeBody[models.SyncResult](t, data); res.Imported != 1 {
+				t.Fatalf("want 1 re-imported, got %+v", res)
+			}
+		})
+	}
+}
+
+func TestCanvasDismissBadRequests(t *testing.T) {
+	base := openTestServer(t, "sqlite") // input validation is backend-independent
+	cases := []struct {
+		name       string
+		method     string
+		url        string
+		body       string
+		wantStatus int
+	}{
+		{"dismiss bad json", http.MethodPost, base + "/canvas/dismiss", `not json`, http.StatusBadRequest},
+		{"dismiss missing id", http.MethodPost, base + "/canvas/dismiss", `{}`, http.StatusBadRequest},
+		{"dismiss zero id", http.MethodPost, base + "/canvas/dismiss", `{"assignment_id":0}`, http.StatusBadRequest},
+		{"dismiss negative id", http.MethodPost, base + "/canvas/dismiss", `{"assignment_id":-5}`, http.StatusBadRequest},
+		{"undismiss bad json", http.MethodPost, base + "/canvas/undismiss", `not json`, http.StatusBadRequest},
+		{"undismiss missing id", http.MethodPost, base + "/canvas/undismiss", `{}`, http.StatusBadRequest},
+		{"undismiss zero id", http.MethodPost, base + "/canvas/undismiss", `{"assignment_id":0}`, http.StatusBadRequest},
+		{"wrong method on dismiss", http.MethodGet, base + "/canvas/dismiss", "", http.StatusMethodNotAllowed},
+		{"wrong method on undismiss", http.MethodGet, base + "/canvas/undismiss", "", http.StatusMethodNotAllowed},
+		{"delete method on dismiss", http.MethodDelete, base + "/canvas/dismiss", "", http.StatusMethodNotAllowed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			status, data := doRaw(t, tc.method, tc.url, tc.body)
+			if status != tc.wantStatus {
+				t.Fatalf("%s %s: want %d, got %d (%s)", tc.method, tc.url, tc.wantStatus, status, data)
+			}
+			assertNoLeak(t, data)
+			if status >= 400 {
+				if se := decodeBody[api.ErrorBody](t, data); strings.TrimSpace(se.Error) == "" {
+					t.Fatalf("want non-empty error, got %s", data)
+				}
+			}
+		})
+	}
+}

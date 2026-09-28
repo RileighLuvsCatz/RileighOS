@@ -259,3 +259,82 @@ func TestDetachCanvasCourse(t *testing.T) {
 		})
 	}
 }
+
+func TestDismissCanvasAssignment(t *testing.T) {
+	for backend, open := range openTestStores(t) {
+		t.Run(backend, func(t *testing.T) {
+			s := open(t)
+
+			if dismissed, err := s.IsCanvasDismissed(101); err != nil || dismissed {
+				t.Fatalf("want not dismissed, got %v, err %v", dismissed, err)
+			}
+
+			// Dismiss of a never-seen ID is allowed (tombstone first).
+			if err := s.DismissCanvasAssignment(101); err != nil {
+				t.Fatal(err)
+			}
+			if dismissed, err := s.IsCanvasDismissed(101); err != nil || !dismissed {
+				t.Fatalf("want dismissed, got %v, err %v", dismissed, err)
+			}
+
+			// Re-dismiss is a no-op that still succeeds.
+			if err := s.DismissCanvasAssignment(101); err != nil {
+				t.Fatal(err)
+			}
+			if dismissed, err := s.IsCanvasDismissed(101); err != nil || !dismissed {
+				t.Fatalf("want still dismissed, got %v, err %v", dismissed, err)
+			}
+
+			if err := s.UndismissCanvasAssignment(101); err != nil {
+				t.Fatal(err)
+			}
+			if dismissed, err := s.IsCanvasDismissed(101); err != nil || dismissed {
+				t.Fatalf("want not dismissed after undismiss, got %v, err %v", dismissed, err)
+			}
+
+			// Undismiss of a non-dismissed ID is a silent no-op that
+			// still succeeds.
+			if err := s.UndismissCanvasAssignment(999); err != nil {
+				t.Fatal(err)
+			}
+			if dismissed, err := s.IsCanvasDismissed(999); err != nil || dismissed {
+				t.Fatalf("want not dismissed, got %v, err %v", dismissed, err)
+			}
+		})
+	}
+}
+
+func TestDismissPersistsAcrossReopen(t *testing.T) {
+	openers := map[string]func(dir string) (FullStore, error){
+		"json":   func(dir string) (FullStore, error) { return OpenJSONStore(filepath.Join(dir, "d.json")) },
+		"sqlite": func(dir string) (FullStore, error) { return OpenSQLiteStore(filepath.Join(dir, "d.db")) },
+	}
+	for backend, opener := range openers {
+		t.Run(backend, func(t *testing.T) {
+			dir := t.TempDir()
+			s, err := opener(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.DismissCanvasAssignment(701); err != nil {
+				t.Fatal(err)
+			}
+			s.Close()
+
+			reopened, err := opener(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reopened.Close()
+			if dismissed, err := reopened.IsCanvasDismissed(701); err != nil || !dismissed {
+				t.Fatalf("dismiss lost across reopen: %v, err %v", dismissed, err)
+			}
+			if err := reopened.UndismissCanvasAssignment(701); err != nil {
+				t.Fatal(err)
+			}
+			if dismissed, err := reopened.IsCanvasDismissed(701); err != nil || dismissed {
+				t.Fatalf("undismiss lost: %v, err %v", dismissed, err)
+			}
+		})
+	}
+}
