@@ -142,3 +142,64 @@ scp rileighos <pi>:/tmp/rileighos
 ```
 
 SQLite file stays at `/var/lib/rileighos/rileighos.db` — binary swaps never touch data.
+
+## Self-updating from GitHub Releases (nightly)
+
+Pushing a tag `v*.*.*` builds `rileighos-linux-arm64` (+ `.sha256`) via
+`.github/workflows/release.yml`. The Pi can pull that asset overnight by
+itself with `deploy/rileighos-update.sh` + the `rileighos-update` timer:
+
+- The script asks the GitHub API for the latest release, downloads
+  `rileighos-linux-arm64` and its published `.sha256` to a temp dir,
+  verifies the download against the published checksum, and compares it
+  (sha256) with `/usr/local/bin/rileighos`. Identical → exit 0, nothing to do.
+- If different, it backs up the running binary to
+  `/usr/local/bin/rileighos.prev`, installs the new one (0755), and
+  `systemctl restart rileighos`, then checks `systemctl is-active`. On any
+  failure it restores `.prev`, restarts, and exits nonzero.
+- Only stock Pi OS tools are needed: bash, curl, sha256sum, systemctl
+  (python3 is used for JSON parsing when present, with a grep/sed fallback —
+  jq is never required).
+
+Install on the Pi (one time):
+
+```sh
+# from repo root (laptop), replace <pi> with tailnet name/IP
+scp deploy/rileighos-update.sh deploy/rileighos-update.service deploy/rileighos-update.timer <pi>:/tmp/
+
+# on the Pi
+sudo install -m 0755 /tmp/rileighos-update.sh /usr/local/bin/rileighos-update
+sudo install -m 0644 /tmp/rileighos-update.service /etc/systemd/system/rileighos-update.service
+sudo install -m 0644 /tmp/rileighos-update.timer /etc/systemd/system/rileighos-update.timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now rileighos-update.timer
+systemctl list-timers rileighos-update --no-pager  # next run ~03:30 ±30m
+```
+
+Check status / logs:
+
+```sh
+systemctl list-timers --no-pager | grep rileighos
+systemctl status rileighos-update --no-pager
+journalctl -u rileighos-update --no-pager  # per-night "already up to date" or "updated to vX.Y.Z"
+rileighos version  # ldflags-stamped tag ("dev" for hand-built binaries)
+```
+
+Manual trigger (no need to wait for 03:30):
+
+```sh
+sudo systemctl start rileighos-update
+journalctl -u rileighos-update -n 20 --no-pager
+```
+
+Rollback to the previous binary:
+
+```sh
+sudo cp /usr/local/bin/rileighos.prev /usr/local/bin/rileighos && sudo systemctl restart rileighos
+```
+
+Why binary swaps are safe for data: SQLite migrations are additive-only
+(`CREATE TABLE IF NOT EXISTS` plus `ALTER TABLE ... ADD COLUMN` in
+`internal/store/sqlite_store.go`). Updating the binary never touches
+`/var/lib/rileighos/rileighos.db` — old rows stay readable and new columns
+get defaults on first run.

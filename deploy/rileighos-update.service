@@ -1,0 +1,9 @@
+[Unit]
+Description=Update rileighos binary from latest GitHub Release
+Documentation=file:///usr/local/share/doc/rileighos/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/rileighos-update
